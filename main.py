@@ -166,11 +166,6 @@ def parse_with_selenium(article_url: str) -> Tuple[Optional[str], List[str]]:
 
         driver.get(article_url)
 
-        # --- Эти строки больше не нужны, т.к. undetected_chromedriver сам патчит ---
-        # driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
-        #     'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
-        # })
-        
         # Ждем, пока основной контентный div станет видимым/присутствующим на странице
         WebDriverWait(driver, 45).until( # Увеличено до 45 секунд
             EC.presence_of_element_located((By.ID, "fck_detail"))
