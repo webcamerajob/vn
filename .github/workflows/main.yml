@@ -29,7 +29,7 @@ jobs:
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements-parser.txt # Убедитесь, что ваш файл называется именно 'requirements.txt'
+        pip install -r requirements.txt # Убедитесь, что ваш файл называется именно 'requirements.txt'
       
     - name: Download specific ChromeDriver
       run: |
@@ -49,24 +49,18 @@ jobs:
         echo "ChromeDriver version installed:"
         chromedriver --version # Проверяем установленную версию ChromeDriver
       
-    - name: Run parser
+    - name: Run parser (DEBUG MODE: output directly to console)
       # Если вы используете WireGuard, раскомментируйте следующую строку и убедитесь, что WG_CONFIG настроен в Secrets.
       # env:
       #   WG_CONFIG: ${{ secrets.WG_CONFIG }} 
       run: |
-        # Перенаправляем stdout и stderr Python-скрипта в файл 'parser_output.log'
-        python main.py --rss-url https://e.vnexpress.net/rss/news.rss --limit 5 > parser_output.log 2>&1
+        # ВРЕМЕННО: УБИРАЕМ ПЕРЕНАПРАВЛЕНИЕ В ФАЙЛ, ЧТОБЫ УВИДЕТЬ ВСЕ ЛОГИ НАПРЯМУЮ В КОНСОЛИ GITHUB ACTIONS
+        python main.py --rss-url https://e.vnexpress.net/rss/news.rss --limit 5 
 
-    - name: Get new_articles_found status
+    - name: Get new_articles_found status (Temporarily set to false, for debugging)
       id: get_status
       run: |
-        # Извлекаем последнюю строку из файла логов и ищем статус
-        STATUS_LINE=$(tail -n 1 parser_output.log | grep "NEW_ARTICLES_STATUS")
-        # Проверяем, найдена ли строка статуса. Если нет, устанавливаем false.
-        if [[ -z "$STATUS_LINE" ]]; then
-          STATUS="false"
-        else
-          STATUS=${STATUS_LINE#*:} # Извлекаем значение после двоеточия (true/false)
-        fi
-        echo "new_articles_found=$STATUS" >> "$GITHUB_OUTPUT"
+        # Этот шаг теперь не будет читать из файла, а просто установит статус на 'false',
+        # так как мы отключили перенаправление в 'parser_output.log' для отладки.
+        echo "new_articles_found=false" >> "$GITHUB_OUTPUT"
       shell: bash
