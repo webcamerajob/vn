@@ -209,33 +209,40 @@ def parse_full_article(article_url: str) -> Tuple[Optional[str], List[str]]:
             soup = BeautifulSoup(r.text, 'html.parser')
 
             # --- Извлечение текста ---
-            # Основной контент статьи в VnExpress часто находится в <article class="fck_detail">
-            # или внутри div с классом, например, "detail-content" или "main_content"
+            # Перечень возможных селекторов для основного контента статьи на VnExpress
             content_div = soup.find('article', class_='fck_detail')
             if not content_div:
-                content_div = soup.find('div', class_='detail-content') # Другой возможный класс
+                content_div = soup.find('div', class_='detail-content')
             if not content_div:
-                content_div = soup.find('div', class_='main_content_detail') # Ещё один возможный класс
-            
+                content_div = soup.find('div', class_='main_content_detail')
+            if not content_div: # <<< ДОБАВЛЕНИЕ НОВОГО СЕЛЕКТОРА
+                content_div = soup.find(id='vne_content_detail') # Очень распространенный ID на VnExpress
+
             if content_div:
-                # Удаляем ненужные элементы (например, рекламные блоки, скрипты, подписи)
-                for unwanted_tag in content_div.find_all(['script', 'style', 'figure', 'figcaption', 'span', 'p', 'div']):
-                    # Удаляем только те, которые точно не являются частью текста
-                    # Например, рекламные блоки с id или классами
+                # Удаляем ненужные элементы
+                for unwanted_tag in content_div.find_all(['script', 'style', 'figure', 'figcaption', 'span', 'p', 'div', 'a']):
                     if unwanted_tag.name == 'p' and unwanted_tag.get_text(strip=True).lower() in ["read more", "related news", "video", "see more"]:
                         unwanted_tag.decompose()
                     elif unwanted_tag.name == 'div' and ('vne_s_tag' in unwanted_tag.get('class', []) or 'share_box' in unwanted_tag.get('class', [])):
-                         unwanted_tag.decompose()
-                    elif unwanted_tag.name == 'figure': # Удаляем figure, чтобы обработать img отдельно
                         unwanted_tag.decompose()
-                    elif unwanted_tag.name == 'figcaption':
-                        unwanted_tag.decompose() # Удаляем подписи к картинкам
                     elif unwanted_tag.name == 'a' and unwanted_tag.get_text(strip=True).lower() == "read more": # Удаляем "Read more" ссылки
                          unwanted_tag.decompose()
-                
-                # Собираем параграфы. VnExpress часто использует <p> внутри fck_detail
+                    elif unwanted_tag.name == 'figure': # В некоторых случаях VnExpress использует <figure> внутри контент-блока
+                        unwanted_tag.decompose() # Удаляем figure, чтобы обработать img отдельно
+                    elif unwanted_tag.name == 'figcaption':
+                        unwanted_tag.decompose() # Удаляем подписи к картинкам
+                    elif unwanted_tag.name == 'span' and unwanted_tag.get('itemprop') == 'name': # Иногда бывают такие spans
+                        unwanted_tag.decompose()
+
+                # Собираем параграфы.
                 paras = [p.get_text(strip=True) for p in content_div.find_all('p') if p.get_text(strip=True)]
-                full_text = "\n\n".join(paras)
+                # Также могут быть другие блочные элементы, содержащие текст, например, div без класса
+                # Если параграфы не всегда в <p>, можно попробовать получить весь текст из content_div
+                if not paras: # Если не нашли <p>
+                    full_text = content_div.get_text(separator="\n\n", strip=True) # Получаем весь текст с разделителями
+                else:
+                    full_text = "\n\n".join(paras)
+                
                 full_text = bad_re.sub("", full_text)
                 full_text = re.sub(r"[ \t]+", " ", full_text)
                 full_text = re.sub(r"\n{3,}", "\n\n", full_text)
@@ -245,23 +252,21 @@ def parse_full_article(article_url: str) -> Tuple[Optional[str], List[str]]:
 
             # --- Извлечение изображений ---
             # Ищем изображения в основном контенте или в специальных блоках галереи
-            # VnExpress часто использует <img> внутри <figure> или напрямую
             img_tags = content_div.find_all('img') if content_div else []
-            # Дополнительно ищем изображения в div с классом "container" или "item_slide_show"
-            # или в любом другом блоке, где могут быть основные изображения статьи
-            # Это может потребовать ручного анализа для каждого типа страницы (статья, галерея)
             
-            # Попробуем найти общие места для изображений, если не в fck_detail
-            if not img_tags:
-                img_tags = soup.select('.img_general img, .item_slide_show img, .photo img')
-                
+            # Дополнительно ищем изображения, которые могут быть вне основного контентного блока
+            # Например, в главном заголовке статьи или в шапке (featured image)
+            # Часто это img внутри <div class="thumb_art"> или <picture>
+            img_tags.extend(soup.select('div.thumb_art img, picture img'))
+            
             for img_tag in img_tags:
                 img_url = extract_img_url(img_tag)
-                if img_url and img_url.startswith('https://i-vnexpress.vnecdn.net'): # Фильтруем по домену изображений VnExpress
+                # Домен изображений VnExpress часто https://i-vnexpress.vnecdn.net
+                if img_url and (img_url.startswith('https://i-vnexpress.vnecdn.net') or img_url.startswith('https://image.vnecdn.net')):
                     image_urls.append(img_url)
             
-            # Уникализируем список изображений
-            image_urls = list(dict.fromkeys(image_urls)) # Сохраняем порядок
+            # Уникализируем список изображений, сохраняя порядок
+            image_urls = list(dict.fromkeys(image_urls)) 
             
             return full_text, image_urls
 
@@ -274,9 +279,9 @@ def parse_full_article(article_url: str) -> Tuple[Optional[str], List[str]]:
             time.sleep(delay)
         except Exception as e:
             logging.error(f"Error parsing full article {article_url}: {e}")
-            break # Не повторять, если это не проблема сети
+            break
     
-    return None, [] # Возвращаем None, если не удалось получить контент
+    return None, []
 
 # Функция parse_and_save (значительные изменения для работы с RSS-данными и полным парсингом)
 def parse_and_save(article_info: Dict[str, Any], translate_to: str) -> Optional[Dict[str, Any]]:
