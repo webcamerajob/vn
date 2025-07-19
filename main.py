@@ -346,5 +346,7 @@ if __name__ == "__main__":
         logging.error(f"Error during RSS feed processing: {e}", exc_info=True)
 
     # ВАЖНО: Эта строка выводится в stdout, чтобы GitHub Actions мог ее прочитать.
+    # В этой отладочной версии она не будет перенаправлена в файл, а пойдет в лог консоли.
     print(f"NEW_ARTICLES_STATUS:{'true' if new_articles_found_status else 'false'}")
     logging.info("→ PARSER RUN COMPLETE")
+    
