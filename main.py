@@ -206,21 +206,20 @@ def parse_full_article(article_url: str) -> Tuple[Optional[str], List[str]]:
         try:
             r = SCRAPER.get(article_url, timeout=SCRAPER_TIMEOUT)
             r.raise_for_status()
+            
+            # For debugging: print a snippet of the fetched HTML
+            # logging.debug(f"Fetched HTML snippet for {article_url}:\n{r.text[:1000]}") # Uncomment for deeper debug
+            
             soup = BeautifulSoup(r.text, 'html.parser')
 
             # --- Extracting Text ---
-            # Most common main content container on VnExpress International
-            # The 'fck_detail' ID is often present.
-            # Use find() with multiple attributes or CSS selector for robustness
-            content_div = soup.find('div', id='fck_detail')
-            if not content_div: # Fallback for pages without id="fck_detail"
-                content_div = soup.find('article', class_='fck_detail') # Sometimes it's an article tag
-            if not content_div:
-                content_div = soup.find('div', class_='detail-content') # Another common class
-            if not content_div:
-                content_div = soup.find('div', class_='main_content_detail') # Yet another class
-
+            # Try to find the main content div. The ID 'fck_detail' is critical.
+            # Using select_one for direct CSS selector.
+            content_div = soup.select_one('div#fck_detail, article.fck_detail, div.detail-content, div.main_content_detail')
+            
             if content_div:
+                logging.info(f"Found main content div with tag: {content_div.name} and attrs: {content_div.attrs.get('id')} {content_div.attrs.get('class')} for {article_url}")
+
                 # Remove unwanted elements that are NOT part of the main narrative text
                 for unwanted_tag_selector in [
                     'script', 'style', 'figure', 'figcaption', # Scripts, styles, image figures/captions
@@ -245,33 +244,33 @@ def parse_full_article(article_url: str) -> Tuple[Optional[str], List[str]]:
                 full_text = re.sub(r"[ \t]+", " ", full_text)
                 full_text = re.sub(r"\n{3,}", "\n\n", full_text)
             else:
-                logging.warning(f"Could not find main content div for {article_url}")
+                logging.warning(f"Could not find main content div using selectors for {article_url}")
                 full_text = ""
 
             # --- Extracting Images ---
-            # Try to get images from various common locations
-            # 1. Inside the main content div
-            img_tags = content_div.find_all('img') if content_div else []
-
-            # 2. Featured image (often in a div with specific classes, or picture tag)
-            img_tags.extend(soup.select('div.thumb_art img, picture img, div.item_slide_show img'))
+            image_selectors = [
+                'div#fck_detail img', # Images directly in the main content div
+                'div.thumb_art img',  # Featured image
+                'picture img',        # Images within picture tags
+                'div.item_slide_show img', # Images in slideshows
+                'div.wrap_item_detail img', # Another common image wrapper
+                'div.img_side_detail img' # Often for side images/galleries
+            ]
             
-            # 3. Images within a general article content holder, if not already covered
-            img_tags.extend(soup.select('div.wrap_item_detail img')) # Another common image wrapper
-            
-            for img_tag in img_tags:
-                img_url = extract_img_url(img_tag)
-                # Filter by VnExpress image domains to avoid ads or unrelated images
-                if img_url and (img_url.startswith('https://i-vnexpress.vnecdn.net') or \
-                                img_url.startswith('https://image.vnecdn.net') or \
-                                img_url.startswith('https://vcdn-e.vnexpress.net')): # Added vcdn-e domain
-                    image_urls.append(img_url)
+            for selector in image_selectors:
+                for img_tag in soup.select(selector):
+                    img_url = extract_img_url(img_tag)
+                    # Filter by VnExpress image domains
+                    if img_url and (img_url.startswith('https://i-vnexpress.vnecdn.net') or \
+                                    img_url.startswith('https://image.vnecdn.net') or \
+                                    img_url.startswith('https://vcdn-e.vnexpress.net')):
+                        image_urls.append(img_url)
             
             # Deduplicate image URLs while maintaining order
             image_urls = list(dict.fromkeys(image_urls))
             
-            if not full_text: # If we couldn't get text, this article is likely broken or malformed for our parser
-                logging.warning(f"Extracted empty text for {article_url}. Returning None for text.")
+            if not full_text or not full_text.strip(): # Check for truly empty text
+                logging.warning(f"Extracted empty or whitespace-only text for {article_url}. Returning None for text.")
                 return None, []
 
             return full_text, image_urls
