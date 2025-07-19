@@ -1,22 +1,37 @@
-# Основные настройки
-base_url: "https://vnexpress.net"
-category_path: "/thoi-su" # Пример: категория "Общество"
-output_filename: "vnexpress_articles.json"
-request_delay_seconds: 2 # Задержка между запросами к статьям
-request_timeout_seconds: 10 # Таймаут для HTTP-запросов
-max_pages_to_scrape: 2   # Максимальное количество страниц для парсинга (установите больше для полного парсинга)
+name: Run VnExpress Scraper
 
-# Селекторы для парсинга (ОЧЕНЬ ВАЖНО: АДАПТИРУЙТЕ ИХ ПОД АКТУАЛЬНУЮ СТРУКТУРУ VNEXPRESS)
-selectors:
-  # CSS-селектор для ссылок на статьи на странице категории/списка
-  article_link_selector: ".item_list_news .title_news a, .item-news h3 a"
+on:
+  schedule:
+    # Запускать каждый день в 00:00 UTC
+    # Вы можете настроить расписание по своему усмотрению (например, каждые 12 часов)
+    - cron: '0 0 * * *' 
+  workflow_dispatch: # Позволяет запускать вручную из интерфейса GitHub Actions
 
-  # Классы HTML-элементов для извлечения данных из самой статьи
-  # (В Beautiful Soup `find` с `class_` ищет по классу)
-  article_title_class: "title-detail" # Класс для <h1> заголовка статьи
-  article_date_class: "date"          # Класс для <span> даты публикации
-  article_author_class: "author_name" # Класс для <p> автора (если есть)
-  article_content_class: "fck_detail" # Класс для <article> или <div> с основным содержанием статьи
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
 
-  # CSS-селектор для ссылки на следующую страницу пагинации
-  pagination_next_selector: "a.btn-next, .pagination-next a"
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: pip install -r requirements.txt
+
+    - name: Run scraper
+      run: python vnexpress_parser.py
+
+    - name: Commit and push changes
+      run: |
+        git config user.name "GitHub Actions Bot"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add vnexpress_articles.json vnexpress_parser.log
+        git commit -m "Automated: Update VnExpress articles" || echo "No changes to commit"
+        git push origin main || echo "No new data to push"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
