@@ -1,194 +1,70 @@
-name: Parse & Post Articles
-concurrency:
-  group: post-articles
-  cancel-in-progress: false
-  
-permissions:
-  contents: write
+name: Run Python Parser
+
 on:
-  push:
-    branches:
-      - main # Запускать при каждом пуше в ветку main
-  workflow_dispatch: # Позволяет запускать вручную из интерфейса GitHub
   schedule:
-    - cron: '30 22 * * *'  # 5:30 UTC+7 (22:30 UTC)
-    - cron: '0 23 * * *'   # 6:00 UTC+7 (23:00 UTC)
-    - cron: '30 23 * * *'  # 6:30 UTC+7 (23:30 UTC)
-    - cron: '0 0 * * *'    # 7:00 UTC+7 (00:00 UTC)
-    - cron: '30 0 * * *'   # 7:30 UTC+7 (00:30 UTC)
-    - cron: '0 1 * * *'    # 8:00 UTC+7 (01:00 UTC)
-    - cron: '30 1 * * *'   # 8:30 UTC+7 (01:30 UTC)
-    - cron: '0 2 * * *'    # 9:00 UTC+7 (02:00 UTC)
-    - cron: '30 2 * * *'   # 9:30 UTC+7 (02:30 UTC)
-    - cron: '0 3 * * *'    # 10:00 UTC+7 (03:00 UTC)
-    - cron: '30 3 * * *'   # 10:30 UTC+7 (03:30 UTC)
-    - cron: '0 4 * * *'    # 11:00 UTC+7 (04:00 UTC)
-    - cron: '30 4 * * *'   # 11:30 UTC+7 (04:30 UTC)
-    - cron: '0 5 * * *'    # 12:00 UTC+7 (05:00 UTC)
-    - cron: '30 5 * * *'   # 12:30 UTC+7 (05:30 UTC)
-    - cron: '0 6 * * *'    # 13:00 UTC+7 (06:00 UTC)
-    - cron: '30 6 * * *'   # 13:30 UTC+7 (06:30 UTC)
-    - cron: '0 7 * * *'    # 14:00 UTC+7 (07:00 UTC)
-    - cron: '30 7 * * *'   # 14:30 UTC+7 (07:30 UTC)
-    - cron: '0 8 * * *'    # 15:00 UTC+7 (08:00 UTC)
-    - cron: '30 8 * * *'   # 15:30 UTC+7 (08:30 UTC)
-    - cron: '0 9 * * *'    # 16:00 UTC+7 (09:00 UTC)
-    - cron: '30 9 * * *'   # 16:30 UTC+7 (09:30 UTC)
-    - cron: '0 10 * * *'   # 17:00 UTC+7 (10:00 UTC)
-    - cron: '30 10 * * *'  # 17:30 UTC+7 (10:30 UTC)
-    - cron: '0 11 * * *'   # 18:00 UTC+7 (11:00 UTC)
-    - cron: '30 11 * * *'  # 18:30 UTC+7 (11:30 UTC)
-    
-env:
-  POST_DELAY: 10
-  BATCH_LIMIT: 30
+    # Запускать каждый день в 00:00 UTC (или 7:00 AM по вашему часовому поясу, если вы в +7)
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    # Позволяет запускать вручную из интерфейса GitHub Actions
 
 jobs:
-  parse:
-    name: Парсинг → артефакты
+  parse_articles:
     runs-on: ubuntu-latest
-    outputs:
-      new_articles_found: ${{ steps.parse_step.outputs.new_articles_found }}
-    env:
-      WG_CONFIG: ${{ secrets.WG_CONFIG }} # Если WireGuard используется
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.9' # <-- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: используем Python 3.9 для совместимости с undetected_chromedriver
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9' # Используйте 3.9, так как undetected_chromedriver хорошо работает с ним
 
-      - name: Cache pip
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements-parser.txt') }}
-          restore-keys: |
-             ${{ runner.os }}-pip-
-
-      - name: Install parser requirements
-        run: |
-          # undetected-chromedriver будет установлен из requirements-parser.txt
-          if [ -f requirements-parser.txt ]; then
-            pip install -r requirements-parser.txt
-          fi
-
-      # --- Установка Google Chrome. undetected_chromedriver сам скачает подходящий ChromeDriver. ---
-      - name: Install Chrome
-        run: |
-          sudo apt-get update
-          sudo apt-get install google-chrome-stable -y
-          echo "Chrome version:"
-          google-chrome --version
+    - name: Install system dependencies for Chrome
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y google-chrome-stable # Убедимся, что Chrome установлен
+        google-chrome --version # Проверяем версию установленного Chrome. ЭТО ВАЖНО ДЛЯ ДАЛЬНЕЙШИХ ОБНОВЛЕНИЙ version_main/ChromeDriver
+        
+    - name: Install Python dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
       
-      # Шаги установки ChromeDriver вручную были удалены,
-      # так как undetected_chromedriver управляет этим сам.
+    - name: Download specific ChromeDriver
+      run: |
+        # ВАЖНО: ЭТА ВЕРСИЯ CHROME И CHROME DRIVER ДОЛЖНА СОВПАДАТЬ!
+        # ТЕКУЩАЯ ВЕРСИЯ CHROME В GITHUB ACTIONS - 138.0.7204.100 (из ваших логов)
+        # Если Chrome в GitHub Actions обновится, вам нужно будет обновить CHROME_DRIVER_VERSION здесь
+        CHROME_DRIVER_VERSION="138.0.7204.100" 
+        CHROME_DRIVER_URL="https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing/${CHROME_DRIVER_VERSION}/linux64/chromedriver-linux64.zip"
+        
+        echo "Downloading ChromeDriver from: $CHROME_DRIVER_URL"
+        wget -N $CHROME_DRIVER_URL -P /tmp
+        unzip -o /tmp/chromedriver-linux64.zip -d /tmp/chromedriver_dir # Использовал другое имя, чтобы избежать конфликтов
+        
+        # Перемещаем исполняемый файл в стандартный путь и даем права
+        sudo mv /tmp/chromedriver_dir/chromedriver-linux64 /usr/local/bin/chromedriver
+        sudo chmod +x /usr/local/bin/chromedriver
+        
+        echo "ChromeDriver version installed:"
+        chromedriver --version
+      
+    - name: Run parser
+      env:
+        WG_CONFIG: ${{ secrets.WG_CONFIG }} # Если используете WireGuard (передайте через секреты)
+      run: |
+        python main.py --rss-url https://e.vnexpress.net/rss/news.rss --limit 5
 
-      - name: Run parser
-        id: parse_step
-        run: |
-          echo "→ STARTING PARSER RUN"
-          python3 -u main.py --rss-url https://e.vnexpress.net/rss/news.rss -l ru -n 5 \
-            --lang ${{ inputs.lang || 'ru' }} \
-            --limit ${{ env.BATCH_LIMIT_PARSE || 30 }} \
-            --posted-state-file articles/posted.json | tee parser_output.txt
+    - name: Get new_articles_found status
+      id: get_status
+      run: |
+        # Извлекаем последнюю строку из логов и ищем статус
+        STATUS_LINE=$(tail -n 1 parse_articles.log | grep "NEW_ARTICLES_STATUS")
+        STATUS=${STATUS_LINE#*:} # Извлекаем значение после двоеточия
+        echo "new_articles_found=$STATUS" >> $GITHUB_OUTPUT
+      shell: bash {0}
 
-          echo "→ PARSER RUN COMPLETE"
-          
-          # Извлекаем статус наличия новых статей из вывода парсера
-          NEW_ARTICLES_STATUS=$(grep "NEW_ARTICLES_STATUS:" parser_output.txt | cut -d: -f2 | tr -d '[:space:]')
-          echo "new_articles_found=$NEW_ARTICLES_STATUS" >> $GITHUB_OUTPUT
-          echo "Extracted new_articles_found status: '$NEW_ARTICLES_STATUS'"
-
-      - name: Debug all files
-        run: ls -R
-
-      - name: Debug parser output
-        run: |
-          echo "→ Tree of generated articles/:"
-          ls -R articles || echo "articles directory not found or empty."
-
-      - name: Upload parsed-content
-        uses: actions/upload-artifact@v4
-        with:
-          name: parsed-content
-          path: articles/*
-
-  post:
-    name: Publish new articles
-    needs: parse
-    runs-on: ubuntu-latest
-    env:
-      TELEGRAM_TOKEN:   ${{ secrets.TELEGRAM_TOKEN }}
-      TELEGRAM_CHANNEL: ${{ secrets.TELEGRAM_CHANNEL }}
-
-    steps:
-      - name: Checkout repo (contains empty catalog.json)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: true
-
-      - name: Set up Python for poster
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.9' # <-- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: здесь тоже используем Python 3.9
-
-      - name: Cache pip
-        uses: actions/cache@v3
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('requirements-poster.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
-            
-      - name: Install poster requirements
-        run: |
-          pip install -r requirements-poster.txt
-
-      - name: Download parsed-content
-        uses: actions/download-artifact@v4
-        with:
-          name: parsed-content
-          path: parsed_articles
-
-      - name: Debug parsed_articles
-        run: |
-          echo "→ Tree of parsed_articles/:"
-          ls -R parsed_articles || echo "parsed_articles directory not found or empty."
-
-      - name: Debug extracted status
-        run: |
-          echo "Value of new_articles_found from parse_step: '${{ needs.parse.outputs.new_articles_found }}'"
-          echo "Comparison result: ${{ needs.parse.outputs.new_articles_found == 'true' }}"
-          
-      - name: Run poster
-        # Условие для запуска Poster, только если parse_step успешно нашел новые статьи
-        if: needs.parse.outputs.new_articles_found == 'true' 
-        run: |
-          echo "→ Running poster against parsed_articles"
-          python3 poster.py \
-            --parsed-dir parsed_articles \
-            --state-file articles/posted.json \
-            --limit $BATCH_LIMIT
-
-      - name: Debug articles after poster
-        run: |
-          echo "→ Tree of articles/ after poster run:"
-          ls -R articles || echo "articles directory not found or empty."
-
-      - name: Commit updated posted.json
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add articles/posted.json
-          # Проверяем, есть ли изменения для коммита
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: update posted catalog after posting"
-            git push
-          else
-            echo "✅ posted.json unchanged"
-          fi
+    # Этот шаг опционален и нужен, если вы хотите использовать статус в других местах workflow
+    - name: Use new_articles_found status
+      run: echo "New articles found status: ${{ steps.get_status.outputs.new_articles_found }}"
