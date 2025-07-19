@@ -163,8 +163,8 @@ def parse_with_selenium(article_url: str) -> Tuple[Optional[str], List[str]]:
         # use_subprocess=True: может помочь в CI окружениях
         # options=local_chrome_options_uc: передаем наш свежий объект опций
         # version_main: Указываем точную версию Chrome, которая установлена в GitHub Actions.
-        # ВАЖНО: ЗАМЕНИТЕ '126' НА АКТУАЛЬНУЮ ОСНОВНУЮ ВЕРСИЮ CHROME ИЗ ВАШИХ ЛОГОВ GITHUB ACTIONS!
-        driver = uc.Chrome(headless=True, use_subprocess=True, options=local_chrome_options_uc, version_main=126) 
+        # ВАЖНО: ОБНОВЛЕНО на 138, так как текущая версия Chrome в GitHub Actions - 138.
+        driver = uc.Chrome(headless=True, use_subprocess=True, options=local_chrome_options_uc, version_main=138) 
 
         # Установка таймаутов для Selenium
         driver.set_page_load_timeout(90) # УВЕЛИЧЕНО до 90 секунд для загрузки страницы
@@ -270,6 +270,19 @@ if __name__ == "__main__":
 
     logging.info(f"Starting RSS feed processing for: {RSS_URL}")
     logging.info(f"Already posted articles count: {len(posted_ids)}")
+    
+    # --- ДОБАВЛЕНО: Проверка внешнего IP в логах ---
+    import requests
+    logging.info("Checking external IP...")
+    try:
+        ip_response = requests.get('http://ip-api.com/json', timeout=10)
+        ip_response.raise_for_status()
+        ip_data = ip_response.json()
+        logging.info(f"Current external IP: {ip_data.get('query')}, Country: {ip_data.get('country')}")
+    except Exception as e:
+        logging.warning(f"Could not check external IP: {e}")
+    # --- КОНЕЦ ПРОВЕРКИ IP ---
+
 
     try:
         # Используем Cloudscraper для получения RSS-ленты, т.к. там нет JS
