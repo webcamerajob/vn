@@ -27,11 +27,9 @@ RETRY_DELAY   = 5.0
 DEFAULT_DELAY = 10.0 # Изменен с 5.0 на 10.0, как в вашей версии
 
 def escape_markdown(text: str) -> str:
-    """
-    Экранирует спецсимволы для MarkdownV2, кроме звездочки (*), которая используется для жирного текста.
-    """
-    # Удаляем '*' из списка символов для экранирования, так как он будет использоваться для жирного текста.
-    markdown_chars = r'\_[]()~`>#+-=|{}.!'
+    
+    Экранирует спецсимволы для MarkdownV2
+    markdown_chars = r'\_*[]()~`>#+=-|{}.!'
     return re.sub(r'([%s])' % re.escape(markdown_chars), r'\\\1', text)
 
 def chunk_text(text: str, size: int = 4096) -> List[str]:
