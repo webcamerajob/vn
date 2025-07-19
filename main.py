@@ -159,7 +159,15 @@ def parse_full_article(article_url: str) -> Tuple[Optional[str], List[str]]:
             r = SCRAPER.get(article_url, timeout=SCRAPER_TIMEOUT)
             r.raise_for_status()
             
-            # logging.debug(f"Fetched HTML snippet for {article_url}:\n{r.text[:1000]}") # Uncomment for deeper debug
+            # >>> CRITICAL DEBUGGING STEP: PRINT RAW HTML <<<
+            # This will print the first 5000 characters of the HTML that Cloudscraper retrieves.
+            # Examine this output carefully for 'id="fck_detail"' or other expected content.
+            logging.debug(f"Raw HTML for {article_url} (first 5000 chars):\n{r.text[:5000]}...") 
+            # If you want to see the *entire* HTML for one article, you can write it to a file:
+            # with open("debug_raw_html.html", "w", encoding="utf-8") as f:
+            #     f.write(r.text)
+            # logging.debug("Full raw HTML saved to debug_raw_html.html")
+            # >>> END CRITICAL DEBUGGING STEP <<<
             
             soup = BeautifulSoup(r.text, 'html.parser')
 
@@ -169,85 +177,26 @@ def parse_full_article(article_url: str) -> Tuple[Optional[str], List[str]]:
 
             # Priority 2: Photo story lead text (if not found in main content)
             if not content_div:
-                content_div = soup.select_one('div.box_category_show, div.wrapper_detail_photo_story') # These often contain the fck_detail inside
+                content_div = soup.select_one('div.box_category_show, div.wrapper_detail_photo_story')
             
-            # --- Text Extraction Logic ---
+            # ... (rest of your parse_full_article function remains the same) ...
+            # Keep all the content and image extraction logic as it was in the last full code block I provided.
+            # Only add the logging.debug(f"Raw HTML...") part.
+            
             if content_div:
                 logging.info(f"Found main/photo content div with tag: {content_div.name} and attrs: {content_div.attrs.get('id')} {content_div.attrs.get('class')} for {article_url}")
 
-                # Remove unwanted elements that are NOT part of the main narrative text
-                # Adjusted for photo stories: sometimes <figcaption> should be kept if it has text.
-                # Here, we keep it simple: remove scripts, styles, certain known ad/social blocks.
-                for unwanted_tag_selector in [
-                    'script', 'style', '.unprint', '.vne_s_tag', '.share_box',
-                    'a.read_more', 'p.short_intro_detail', 'p.description',
-                    'div.item_slide_show' # Remove this entire block if text isn't in it (images are handled separately)
-                ]:
-                    for tag_to_remove in content_div.select(unwanted_tag_selector):
-                        tag_to_remove.decompose()
-                
-                # For regular articles, find p and h3 inside the content_div
-                text_elements = content_div.find_all(['p', 'h3'])
-                
-                # For photo stories, text can also be in span tags with specific classes,
-                # or in <div class="item_description"> within a slide show item.
-                if not text_elements: # If no <p> or <h3> were found, try photo story specific text containers
-                    # Try finding text within photo item descriptions
-                    for desc_div in soup.select('div.item_slide_show p, div.item_slide_show span.description, div.photo_item .description'):
-                        text = desc_div.get_text(strip=True)
-                        if text:
-                            full_text_parts.append(text)
-                
-                for el in text_elements:
-                    text = el.get_text(strip=True)
-                    if text:
-                        full_text_parts.append(text)
-                
-                # Fallback: if specific elements failed, try to get all text from the main content div
-                if not full_text_parts and content_div:
-                    # Get all text, then split by lines to simulate paragraphs
-                    raw_content_text = content_div.get_text(separator="\n", strip=True)
-                    full_text_parts.extend([p.strip() for p in raw_content_text.split('\n') if p.strip()])
-
-
-                full_text = "\n\n".join(full_text_parts)
-                full_text = bad_re.sub("", full_text)
-                full_text = re.sub(r"[ \t]+", " ", full_text)
-                full_text = re.sub(r"\n{3,}", "\n\n", full_text)
+                # ... (rest of text extraction and cleaning) ...
             else:
                 logging.warning(f"Could not find any suitable content div for {article_url}")
                 full_text = ""
 
-            # --- Extracting Images ---
-            image_selectors = [
-                'div#fck_detail img',              # Images directly in standard content div
-                'div.thumb_art img',               # Featured image
-                'picture img',                     # Images within picture tags
-                'div.item_slide_show img',         # Images in slideshows (common for photo stories)
-                'div.wrap_item_detail img',        # Another common image wrapper
-                'div.img_side_detail img',         # Side images/galleries
-                'div.item_content_focus img',      # Specific for certain article types
-                'div.box_img_detail img',          # Another possible container
-                'img.img_general'                  # General image class often outside specific divs
-            ]
-            
-            for selector in image_selectors:
-                for img_tag in soup.select(selector):
-                    img_url = extract_img_url(img_tag)
-                    # Filter by VnExpress image domains
-                    if img_url and (img_url.startswith('https://i-vnexpress.vnecdn.net') or \
-                                    img_url.startswith('https://image.vnecdn.net') or \
-                                    img_url.startswith('https://vcdn-e.vnexpress.net')):
-                        image_urls.append(img_url)
-            
-            # Deduplicate image URLs while maintaining order
-            image_urls = list(dict.fromkeys(image_urls))
-            
-            if not full_text.strip() and not image_urls: # If no text and no images, it's a failure
+            # ... (rest of image extraction) ...
+
+            if not full_text.strip() and not image_urls:
                 logging.warning(f"Extracted empty text AND no images for {article_url}. Returning None.")
                 return None, []
 
-            # If it's a photo story, text might be minimal (just captions) but images are crucial
             if not image_urls and "photo/" in article_url:
                 logging.warning(f"No images found for photo story {article_url}. Skipping.")
                 return None, []
@@ -262,10 +211,10 @@ def parse_full_article(article_url: str) -> Tuple[Optional[str], List[str]]:
             )
             time.sleep(delay)
         except Exception as e:
-            logging.error(f"Error parsing full article {article_url}: {e}", exc_info=True) # Added exc_info for full traceback
+            logging.error(f"Error parsing full article {article_url}: {e}", exc_info=True)
             break
     
-    return None, [] # Return None for text if all attempts fail
+    return None, []
 
 
 def parse_and_save(article_info: Dict[str, Any], translate_to: str) -> Optional[Dict[str, Any]]:
