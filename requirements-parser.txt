@@ -5,3 +5,4 @@ cloudscraper
 translators
 feedparser
 selenium
+undetected-chromedriver
