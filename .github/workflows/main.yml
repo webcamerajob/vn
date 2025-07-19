@@ -2,7 +2,7 @@ name: Run Python Parser
 
 on:
   schedule:
-    # Запускать каждый день в 00:00 UTC (или 7:00 AM по вашему часовому поясу, если вы в +7)
+    # Запускать каждый день в 00:00 UTC
     - cron: '0 0 * * *'
   workflow_dispatch:
     # Позволяет запускать вручную из интерфейса GitHub Actions
@@ -18,13 +18,13 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.9' # Используйте 3.9, так как undetected_chromedriver хорошо работает с ним
+        python-version: '3.9' # Используем Python 3.9, так как он хорошо работает с undetected_chromedriver
 
     - name: Install system dependencies for Chrome
       run: |
         sudo apt-get update
-        sudo apt-get install -y google-chrome-stable # Убедимся, что Chrome установлен
-        google-chrome --version # Проверяем версию установленного Chrome. ЭТО ВАЖНО ДЛЯ ДАЛЬНЕЙШИХ ОБНОВЛЕНИЙ version_main/ChromeDriver
+        sudo apt-get install -y google-chrome-stable # Убедимся, что Google Chrome установлен
+        google-chrome --version # Выводим версию Chrome. Полезно для отладки, если версия изменится.
         
     - name: Install Python dependencies
       run: |
@@ -33,35 +33,35 @@ jobs:
       
     - name: Download specific ChromeDriver
       run: |
-        # ВАЖНО: ЭТА ВЕРСИЯ CHROME И CHROME DRIVER ДОЛЖНА СОВПАДАТЬ!
-        # ТЕКУЩАЯ ВЕРСИЯ CHROME В GITHUB ACTIONS - 138.0.7204.100 (из ваших логов)
-        # Если Chrome в GitHub Actions обновится, вам нужно будет обновить CHROME_DRIVER_VERSION здесь
+        # ВАЖНО: Эта версия ChromeDriver ДОЛЖНА СОВПАДАТЬ с версией Chrome, установленной выше (138.0.7204.100).
+        # Если GitHub Actions обновит Chrome в будущем, вам придется обновить CHROME_DRIVER_VERSION здесь.
         CHROME_DRIVER_VERSION="138.0.7204.100" 
         CHROME_DRIVER_URL="https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing/${CHROME_DRIVER_VERSION}/linux64/chromedriver-linux64.zip"
         
         echo "Downloading ChromeDriver from: $CHROME_DRIVER_URL"
-        wget -N $CHROME_DRIVER_URL -P /tmp
-        unzip -o /tmp/chromedriver-linux64.zip -d /tmp/chromedriver_dir # Использовал другое имя, чтобы избежать конфликтов
+        wget -N $CHROME_DRIVER_URL -P /tmp # Скачиваем архив в /tmp
+        unzip -o /tmp/chromedriver-linux64.zip -d /tmp/chromedriver_dir # Распаковываем в отдельную директорию
         
-        # Перемещаем исполняемый файл в стандартный путь и даем права
+        # Перемещаем исполняемый файл ChromeDriver в /usr/local/bin, чтобы он был в PATH и доступен
         sudo mv /tmp/chromedriver_dir/chromedriver-linux64 /usr/local/bin/chromedriver
-        sudo chmod +x /usr/local/bin/chromedriver
+        sudo chmod +x /usr/local/bin/chromedriver # Делаем файл исполняемым
         
         echo "ChromeDriver version installed:"
-        chromedriver --version
+        chromedriver --version # Проверяем установленную версию ChromeDriver
       
     - name: Run parser
-      env:
-        WG_CONFIG: ${{ secrets.WG_CONFIG }} # Если используете WireGuard (передайте через секреты)
+      # Если вы используете WireGuard, раскомментируйте следующую строку и убедитесь, что WG_CONFIG настроен в Secrets.
+      # env:
+      #   WG_CONFIG: ${{ secrets.WG_CONFIG }} 
       run: |
         python main.py --rss-url https://e.vnexpress.net/rss/news.rss --limit 5
 
     - name: Get new_articles_found status
       id: get_status
       run: |
-        # Извлекаем последнюю строку из логов и ищем статус
+        # Эта часть собирает логи для проверки, были ли найдены новые статьи.
         STATUS_LINE=$(tail -n 1 parse_articles.log | grep "NEW_ARTICLES_STATUS")
-        STATUS=${STATUS_LINE#*:} # Извлекаем значение после двоеточия
+        STATUS=${STATUS_LINE#*:} # Извлекаем значение после двоеточия (true/false)
         echo "new_articles_found=$STATUS" >> $GITHUB_OUTPUT
       shell: bash {0}
 
