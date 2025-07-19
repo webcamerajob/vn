@@ -95,7 +95,7 @@ jobs:
         run: |
           echo "→ STARTING PARSER RUN" # Маркер начала работы парсера
           # Запускаем парсер, его логи идут напрямую в консоль и в файл
-          python3 -u main.py \
+          python3 -u main.py --rss-url https://e.vnexpress.net/rss/news.rss -l ru -n 5 \
             --lang ${{ inputs.lang || 'ru' }} \
             --limit ${{ env.BATCH_LIMIT_PARSE || 30 }} \
             --posted-state-file articles/posted.json | tee parser_output.txt
