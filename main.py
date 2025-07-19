@@ -4,6 +4,7 @@ import json
 import os
 import re
 from typing import Optional, List, Tuple
+import random # Добавлено для случайных задержек
 
 # Импорты для Cloudscraper
 import cloudscraper
@@ -18,7 +19,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
 
-# --- ДОБАВЛЕНО: Импорт для undetected_chromedriver ---
+# --- Импорт для undetected_chromedriver ---
 import undetected_chromedriver as uc
 
 # --- КОНФИГУРАЦИЯ ЛОГИРОВАНИЯ ---
@@ -30,10 +31,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 MAX_RETRIES = 3
 BASE_DELAY = 1.0
 SCRAPER_TIMEOUT = 30 # Увеличиваем общий таймаут для запросов
-
-# --- КОНФИГУРАЦИЯ SELENIUM (для undetected_chromedriver) ---
-# CHROME_DRIVER_PATH = None # uc.Chrome() сам скачивает драйвер, поэтому это остается None
-# ГЛОБАЛЬНЫЙ ОБЪЕКТ chrome_options_uc УДАЛЕН. Он будет создаваться в функции parse_with_selenium.
 
 # --- ИНИЦИАЛИЗАЦИЯ CLOUDSCRAPER ---
 scraper = cloudscraper.create_scraper(
@@ -165,16 +162,18 @@ def parse_with_selenium(article_url: str) -> Tuple[Optional[str], List[str]]:
         # headless=True: запускает браузер в безголовом режиме (без GUI)
         # use_subprocess=True: может помочь в CI окружениях
         # options=local_chrome_options_uc: передаем наш свежий объект опций
-        driver = uc.Chrome(headless=True, use_subprocess=True, options=local_chrome_options_uc)
+        # version_main: Указываем точную версию Chrome, которая установлена в GitHub Actions.
+        # ВАЖНО: ЗАМЕНИТЕ '126' НА АКТУАЛЬНУЮ ОСНОВНУЮ ВЕРСИЮ CHROME ИЗ ВАШИХ ЛОГОВ GITHUB ACTIONS!
+        driver = uc.Chrome(headless=True, use_subprocess=True, options=local_chrome_options_uc, version_main=126) 
 
         # Установка таймаутов для Selenium
-        driver.set_page_load_timeout(60) # Максимальное время на загрузку страницы
+        driver.set_page_load_timeout(90) # УВЕЛИЧЕНО до 90 секунд для загрузки страницы
         driver.set_script_timeout(30)    # Максимальное время для выполнения асинхронных скриптов
 
         driver.get(article_url)
 
         # Ждем, пока основной контентный div станет видимым/присутствующим на странице
-        WebDriverWait(driver, 45).until( # Увеличено до 45 секунд
+        WebDriverWait(driver, 90).until( # УВЕЛИЧЕНО до 90 секунд для ожидания элемента
             EC.presence_of_element_located((By.ID, "fck_detail"))
         )
 
@@ -328,7 +327,8 @@ if __name__ == "__main__":
                 new_articles_found_status = True
                 add_posted_article_id(POSTED_STATE_FILE, article_id)
                 processed_count += 1
-                time.sleep(BASE_DELAY) # Задержка между обработкой статей
+                # Добавляем случайную задержку между обработкой статей для имитации человеческого поведения
+                time.sleep(BASE_DELAY + random.uniform(2.0, 5.0)) 
 
             else:
                 logging.warning(f"Could not extract content for article '{title}' (ID: {article_id}). Skipping.")
