@@ -29,7 +29,7 @@ jobs:
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements-parser.txt
+        pip install -r requirements-parser.txt # Убедитесь, что ваш файл называется именно 'requirements.txt'
       
     - name: Download specific ChromeDriver
       run: |
@@ -54,14 +54,14 @@ jobs:
       # env:
       #   WG_CONFIG: ${{ secrets.WG_CONFIG }} 
       run: |
-        # Перенаправляем stdout в файл, чтобы затем его можно было прочитать
+        # Перенаправляем stdout и stderr Python-скрипта в файл 'parser_output.log'
         python main.py --rss-url https://e.vnexpress.net/rss/news.rss --limit 5 > parser_output.log 2>&1
 
     - name: Get new_articles_found status
       id: get_status
       run: |
         # Извлекаем последнюю строку из файла логов и ищем статус
-        STATUS_LINE=$(tail -n 1 parser_output.log | grep "NEW_ARTICLES_STATUS") # ИСПРАВЛЕНО: теперь читаем из parser_output.log
+        STATUS_LINE=$(tail -n 1 parser_output.log | grep "NEW_ARTICLES_STATUS")
         # Проверяем, найдена ли строка статуса. Если нет, устанавливаем false.
         if [[ -z "$STATUS_LINE" ]]; then
           STATUS="false"
