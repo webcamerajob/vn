@@ -23,19 +23,19 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 import undetected_chromedriver as uc
 
 # --- КОНФИГУРАЦИЯ ЛОГИРОВАНИЯ ---
+# Уровень INFO для обычных запусков. Для подробной отладки HTML установите DEBUG.
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-# Для отладки raw HTML установите уровень DEBUG:
-# logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
 
 # --- КОНФИГУРАЦИЯ ПАРСЕРА ---
 MAX_RETRIES = 3
-BASE_DELAY = 1.0
-SCRAPER_TIMEOUT = 30 # Увеличиваем общий таймаут для запросов
+BASE_DELAY = 1.0 # Базовая задержка между попытками/статьями
+SCRAPER_TIMEOUT = 30 # Увеличиваем общий таймаут для HTTP-запросов
 
 # --- ИНИЦИАЛИЗАЦИЯ CLOUDSCRAPER ---
+# Инициализируем Cloudscraper для обхода Cloudflare.
 scraper = cloudscraper.create_scraper(
     browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False},
-    delay=10
+    delay=10 # Задержка между запросами, чтобы не быть заблокированным
 )
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ПАРСИНГА ---
@@ -48,8 +48,8 @@ def _extract_content_and_images(soup: BeautifulSoup, article_url: str) -> Tuple[
     full_text_parts = []
     image_urls = []
 
-    # Ищем основной контент-блок
-    content_div = soup.select_one('div#fck_detail, article.fck_detail, div.detail-content, div.main_content_detail')
+    # Ищем основной контент-блок. Использован более широкий набор селекторов для универсальности.
+    content_div = soup.select_one('div#fck_detail, article.fck_detail, div.detail-content, div.main_content_detail, div.folder_detail')
 
     # Дополнительные селекторы для фото-историй или других типов статей, если основной не найден
     if not content_div:
@@ -106,9 +106,8 @@ def parse_with_cloudscraper(article_url: str) -> Tuple[Optional[str], List[str]]
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             r = scraper.get(article_url, timeout=SCRAPER_TIMEOUT)
-            r.raise_for_status()
+            r.raise_for_status() # Вызывает исключение для плохих HTTP-статусов (4xx или 5xx)
             
-            # Для отладки: если уровень логирования DEBUG, выводим часть HTML
             if logging.root.level <= logging.DEBUG:
                 logging.debug(f"Cloudscraper Raw HTML for {article_url} (first 5000 chars):\n{r.text[:5000]}...")
             
@@ -123,7 +122,7 @@ def parse_with_cloudscraper(article_url: str) -> Tuple[Optional[str], List[str]]
                 return None, [] 
 
         except Exception as e:
-            delay = BASE_DELAY * 2 ** (attempt - 1)
+            delay = BASE_DELAY * 2 ** (attempt - 1) # Экспоненциальная задержка
             logging.warning(
                 "Cloudscraper failed fetching %s (try %s/%s): %s; retrying in %.1fs",
                 article_url, attempt, MAX_RETRIES, e, delay
@@ -138,37 +137,34 @@ def parse_with_selenium(article_url: str) -> Tuple[Optional[str], List[str]]:
     driver = None
     try:
         local_chrome_options_uc = Options()
-        local_chrome_options_uc.add_argument("--no-sandbox")
-        local_chrome_options_uc.add_argument("--disable-dev-shm-usage")
-        local_chrome_options_uc.add_argument("--disable-gpu")
-        local_chrome_options_uc.add_argument("--window-size=1920,1080")
-        local_chrome_options_uc.add_argument("--incognito")
+        local_chrome_options_uc.add_argument("--no-sandbox") # Важно для окружений CI/CD
+        local_chrome_options_uc.add_argument("--disable-dev-shm-usage") # Важно для окружений CI/CD
+        local_chrome_options_uc.add_argument("--disable-gpu") # Рекомендуется для headless-режима
+        local_chrome_options_uc.add_argument("--window-size=1920,1080") # Задаем размер окна для имитации реального браузера
+        local_chrome_options_uc.add_argument("--incognito") # Используем инкогнито-режим
         
         # Добавляем User-Agent, соответствующий Chrome 138 (можете обновить, если версия Chrome изменится)
         local_chrome_options_uc.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36")
         
-        # Остальные опции
+        # Дополнительные опции для уменьшения вероятности обнаружения
         local_chrome_options_uc.add_argument("--disable-extensions")
         local_chrome_options_uc.add_argument("--hide-scrollbars")
         local_chrome_options_uc.add_argument("--mute-audio")
         local_chrome_options_uc.add_argument("--no-default-browser-check")
         local_chrome_options_uc.add_argument("--no-first-run")
         local_chrome_options_uc.add_argument("--disable-infobars")
-        # --- КОНЕЦ ИНИЦИАЛИЗАЦИИ CHROMEOPTIONS ---
 
-        # headless=True: запускает браузер в безголовом режиме (без GUI)
-        # use_subprocess=True: может помочь в CI окружениях
-        # options=local_chrome_options_uc: передаем наш свежий объект опций
-        # driver_executable_path: Указываем путь к ChromeDriver, который мы скачали вручную.
+        # Инициализация undetected_chromedriver с явно указанным путем к ChromeDriver
+        # Мы скачиваем его вручную в workflow, чтобы гарантировать правильную версию.
         driver = uc.Chrome(
-            headless=True,
-            use_subprocess=True,
+            headless=True, # Запуск в безголовом режиме
+            use_subprocess=True, # Может помочь в CI окружениях
             options=local_chrome_options_uc,
-            driver_executable_path="/usr/local/bin/chromedriver" 
+            driver_executable_path="/usr/local/bin/chromedriver" # Путь к драйверу, установленному в workflow
         ) 
 
         # Установка таймаутов для Selenium
-        driver.set_page_load_timeout(90) # УВЕЛИЧЕНО до 90 секунд для загрузки страницы
+        driver.set_page_load_timeout(90) # УВЕЛИЧЕНО до 90 секунд для полной загрузки страницы
         driver.set_script_timeout(30)    # Максимальное время для выполнения асинхронных скриптов
 
         driver.get(article_url)
@@ -180,7 +176,6 @@ def parse_with_selenium(article_url: str) -> Tuple[Optional[str], List[str]]:
 
         page_source = driver.page_source
         
-        # Для отладки: если уровень логирования DEBUG, выводим часть HTML
         if logging.root.level <= logging.DEBUG:
             logging.debug(f"Selenium Raw HTML for {article_url} (first 5000 chars):\n{page_source[:5000]}...")
 
@@ -273,6 +268,7 @@ if __name__ == "__main__":
     logging.info(f"Already posted articles count: {len(posted_ids)}")
     
     # --- Проверка внешнего IP в логах ---
+    # Этот шаг помогает понять, с какого IP-адреса GitHub Actions делает запросы.
     import requests
     logging.info("Checking external IP...")
     try:
@@ -286,7 +282,7 @@ if __name__ == "__main__":
 
 
     try:
-        # Используем Cloudscraper для получения RSS-ленты, т.к. там нет JS
+        # Используем Cloudscraper для получения RSS-ленты, т.к. там нет JS-защиты
         rss_response = scraper.get(RSS_URL, timeout=SCRAPER_TIMEOUT)
         rss_response.raise_for_status()
         rss_soup = BeautifulSoup(rss_response.text, 'xml') # RSS - это XML
@@ -342,14 +338,13 @@ if __name__ == "__main__":
                 add_posted_article_id(POSTED_STATE_FILE, article_id)
                 processed_count += 1
                 # Добавляем случайную задержку между обработкой статей для имитации человеческого поведения
-                time.sleep(BASE_DELAY + random.uniform(2.0, 5.0)) 
-
+                time.sleep(BASE_DELAY + random.uniform(2.0, 5.0)) # Случайная задержка
             else:
                 logging.warning(f"Could not extract content for article '{title}' (ID: {article_id}). Skipping.")
 
     except Exception as e:
         logging.error(f"Error during RSS feed processing: {e}", exc_info=True)
 
-    # Вывод статуса для GitHub Actions
+    # ВАЖНО: Эта строка выводится в stdout, чтобы GitHub Actions мог ее прочитать.
     print(f"NEW_ARTICLES_STATUS:{'true' if new_articles_found_status else 'false'}")
     logging.info("→ PARSER RUN COMPLETE")
