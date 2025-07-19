@@ -286,7 +286,8 @@ def parse_and_save(article_info: Dict[str, Any], translate_to: str) -> Optional[
     aid = article_info["guid"] 
     # Slug в случае RSS может быть неактуален или генерироваться из заголовка
     # Для совместимости с именем папки, сделаем slug из заголовка, убрав спецсимволы
-    clean_title = re.sub(r'[^\w\s-]', '', article_info["title"]).strip().lower()
+    # Исправлено: получаем строку из словаря 'title'
+    clean_title = re.sub(r'[^\w\s-]', '', article_info["title"]["rendered"]).strip().lower()
     slug = re.sub(r'[-\s]+', '-', clean_title) # Заменяем пробелы и дефисы одним дефисом
 
     art_dir = OUTPUT_DIR / f"{aid}_{slug}" # Имя папки теперь будет aid_slug
