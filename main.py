@@ -148,7 +148,12 @@ def parse_with_selenium(article_url: str) -> Tuple[Optional[str], List[str]]:
         local_chrome_options_uc.add_argument("--disable-gpu")
         local_chrome_options_uc.add_argument("--window-size=1920,1080")
         local_chrome_options_uc.add_argument("--incognito")
-        local_chrome_options_uc.add_experimental_option('excludeSwitches', ['enable-logging'])
+        
+        # --- УДАЛЕНО: local_chrome_options_uc.add_experimental_option('excludeSwitches', ['enable-logging']) ---
+        # Эта опция вызывала ошибку "unrecognized chrome option: excludeSwitches"
+        
+        # Остальные опции, которые могут быть полезны, но учтите, что uc.Chrome()
+        # уже делает многое для обхода детектирования.
         local_chrome_options_uc.add_argument("--disable-extensions")
         local_chrome_options_uc.add_argument("--hide-scrollbars")
         local_chrome_options_uc.add_argument("--mute-audio")
