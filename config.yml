@@ -1,37 +1,16 @@
-name: Run VnExpress Scraper
+# Основные настройки
+base_url: "https://vnexpress.net" # Убедитесь, что эта строка присутствует и правильно написана
+category_path: "/thoi-su" 
+output_filename: "vnexpress_articles.json"
+request_delay_seconds: 2
+request_timeout_seconds: 10
+max_pages_to_scrape: 2
 
-on:
-  schedule:
-    # Запускать каждый день в 00:00 UTC
-    # Вы можете настроить расписание по своему усмотрению (например, каждые 12 часов)
-    - cron: '0 0 * * *' 
-  workflow_dispatch: # Позволяет запускать вручную из интерфейса GitHub Actions
-
-jobs:
-  scrape:
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.9'
-
-    - name: Install dependencies
-      run: pip install -r requirements.txt
-
-    - name: Run scraper
-      run: python vnexpress_parser.py
-
-    - name: Commit and push changes
-      run: |
-        git config user.name "GitHub Actions Bot"
-        git config user.email "github-actions[bot]@users.noreply.github.com"
-        git add vnexpress_articles.json vnexpress_parser.log
-        git commit -m "Automated: Update VnExpress articles" || echo "No changes to commit"
-        git push origin main || echo "No new data to push"
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+# Селекторы для парсинга (ОЧЕНЬ ВАЖНО: АДАПТИРУЙТЕ ИХ ПОД АКТУАЛЬНУЮ СТРУКТУРУ VNEXPRESS)
+selectors:
+  article_link_selector: ".item_list_news .title_news a, .item-news h3 a"
+  article_title_class: "title-detail"
+  article_date_class: "date"
+  article_author_class: "author_name"
+  article_content_class: "fck_detail"
+  pagination_next_selector: "a.btn-next, .pagination-next a"
