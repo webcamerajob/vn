@@ -54,17 +54,19 @@ jobs:
       # env:
       #   WG_CONFIG: ${{ secrets.WG_CONFIG }} 
       run: |
-        python main.py --rss-url https://e.vnexpress.net/rss/news.rss --limit 5
+        python main.py --rss-url https://e.vnexpress.net/rss/news.rss --limit 5 > parser_output.log 2>&1
 
     - name: Get new_articles_found status
       id: get_status
       run: |
         # Эта часть собирает логи для проверки, были ли найдены новые статьи.
         STATUS_LINE=$(tail -n 1 parse_articles.log | grep "NEW_ARTICLES_STATUS")
-        STATUS=${STATUS_LINE#*:} # Извлекаем значение после двоеточия (true/false)
-        echo "new_articles_found=$STATUS" >> $GITHUB_OUTPUT
-      shell: bash {0}
-
-    # Этот шаг опционален и нужен, если вы хотите использовать статус в других местах workflow
-    - name: Use new_articles_found status
-      run: echo "New articles found status: ${{ steps.get_status.outputs.new_articles_found }}"
+        STATUS_LINE=$(tail -n 1 parser_output.log | grep "NEW_ARTICLES_STATUS")
+        # Проверяем, найдена ли строка статуса. Если нет, устанавливаем false.
+        if [[ -z "$STATUS_LINE" ]]; then
+          STATUS="false"
+        else
+          STATUS=${STATUS_LINE#*:}
+        fi
+        echo "new_articles_found=$STATUS" >> "$GITHUB_OUTPUT"
+        shell: bash
