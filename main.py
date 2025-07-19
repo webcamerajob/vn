@@ -4,7 +4,7 @@ import json
 import os
 import re
 from typing import Optional, List, Tuple
-import random # Добавлено для случайных задержек
+import random 
 
 # Импорты для Cloudscraper
 import cloudscraper
@@ -137,8 +137,6 @@ def parse_with_selenium(article_url: str) -> Tuple[Optional[str], List[str]]:
     logging.info(f"Attempting to fetch with Selenium (undetected_chromedriver): {article_url}")
     driver = None
     try:
-        # --- ИНИЦИАЛИЗАЦИЯ CHROMEOPTIONS ПЕРЕМЕЩЕНА ВНУТРЬ ФУНКЦИИ ---
-        # Создавайте новый объект Options каждый раз, когда функция вызывается
         local_chrome_options_uc = Options()
         local_chrome_options_uc.add_argument("--no-sandbox")
         local_chrome_options_uc.add_argument("--disable-dev-shm-usage")
@@ -146,11 +144,10 @@ def parse_with_selenium(article_url: str) -> Tuple[Optional[str], List[str]]:
         local_chrome_options_uc.add_argument("--window-size=1920,1080")
         local_chrome_options_uc.add_argument("--incognito")
         
-        # --- УДАЛЕНО: local_chrome_options_uc.add_experimental_option('excludeSwitches', ['enable-logging']) ---
-        # Эта опция вызывала ошибку "unrecognized chrome option: excludeSwitches"
+        # Добавляем User-Agent, соответствующий Chrome 138 (можете обновить, если версия Chrome изменится)
+        local_chrome_options_uc.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36")
         
-        # Остальные опции, которые могут быть полезны, но учтите, что uc.Chrome()
-        # уже делает многое для обхода детектирования.
+        # Остальные опции
         local_chrome_options_uc.add_argument("--disable-extensions")
         local_chrome_options_uc.add_argument("--hide-scrollbars")
         local_chrome_options_uc.add_argument("--mute-audio")
@@ -162,9 +159,13 @@ def parse_with_selenium(article_url: str) -> Tuple[Optional[str], List[str]]:
         # headless=True: запускает браузер в безголовом режиме (без GUI)
         # use_subprocess=True: может помочь в CI окружениях
         # options=local_chrome_options_uc: передаем наш свежий объект опций
-        # version_main: Указываем точную версию Chrome, которая установлена в GitHub Actions.
-        # ВАЖНО: ОБНОВЛЕНО на 138, так как текущая версия Chrome в GitHub Actions - 138.
-        driver = uc.Chrome(headless=True, use_subprocess=True, options=local_chrome_options_uc, version_main=138) 
+        # driver_executable_path: Указываем путь к ChromeDriver, который мы скачали вручную.
+        driver = uc.Chrome(
+            headless=True,
+            use_subprocess=True,
+            options=local_chrome_options_uc,
+            driver_executable_path="/usr/local/bin/chromedriver" 
+        ) 
 
         # Установка таймаутов для Selenium
         driver.set_page_load_timeout(90) # УВЕЛИЧЕНО до 90 секунд для загрузки страницы
@@ -271,7 +272,7 @@ if __name__ == "__main__":
     logging.info(f"Starting RSS feed processing for: {RSS_URL}")
     logging.info(f"Already posted articles count: {len(posted_ids)}")
     
-    # --- ДОБАВЛЕНО: Проверка внешнего IP в логах ---
+    # --- Проверка внешнего IP в логах ---
     import requests
     logging.info("Checking external IP...")
     try:
