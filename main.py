@@ -18,6 +18,9 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
 
+# --- ДОБАВЛЕНО: Импорт для undetected_chromedriver ---
+import undetected_chromedriver as uc
+
 # --- КОНФИГУРАЦИЯ ЛОГИРОВАНИЯ ---
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 # Для отладки raw HTML установите уровень DEBUG:
@@ -28,32 +31,23 @@ MAX_RETRIES = 3
 BASE_DELAY = 1.0
 SCRAPER_TIMEOUT = 30 # Увеличиваем общий таймаут для запросов
 
-# --- КОНФИГУРАЦИЯ SELENIUM ---
-# Укажите путь к вашему chromedriver.exe или geckodriver.exe
-# Если драйвер находится в PATH (как при установке через GitHub Actions), можете установить None
-CHROME_DRIVER_PATH = None
-
-chrome_options = Options()
-chrome_options.add_argument("--headless")  # Запуск в безголовом режиме (без графического интерфейса)
-chrome_options.add_argument("--no-sandbox")
-chrome_options.add_argument("--disable-dev-shm-usage")
-chrome_options.add_argument("--disable-gpu")
-chrome_options.add_argument("--window-size=1920,1080")
-chrome_options.add_argument("--incognito")
-chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
-
-# --- Добавлено для анти-детектирования ---
-chrome_options.add_argument("--disable-blink-features=AutomationControlled") # Отключает свойство navigator.webdriver
-# Использование актуального User-Agent
-chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
-# Дополнительные опции для уменьшения заметности
-chrome_options.add_argument("--disable-extensions")
-chrome_options.add_argument("--hide-scrollbars")
-chrome_options.add_argument("--mute-audio")
-chrome_options.add_argument("--no-default-browser-check")
-chrome_options.add_argument("--no-first-run")
-chrome_options.add_argument("--disable-infobars")
-
+# --- КОНФИГУРАЦИЯ SELENIUM (для undetected_chromedriver) ---
+# CHROME_DRIVER_PATH = None # uc.Chrome() сам скачивает драйвер, поэтому это остается None
+# Стандартные Chrome Options, которые все еще могут быть полезны, но uc.Chrome() многие из них уже учитывает
+chrome_options_uc = Options()
+chrome_options_uc.add_argument("--no-sandbox")
+chrome_options_uc.add_argument("--disable-dev-shm-usage")
+chrome_options_uc.add_argument("--disable-gpu")
+chrome_options_uc.add_argument("--window-size=1920,1080")
+chrome_options_uc.add_argument("--incognito")
+chrome_options_uc.add_experimental_option('excludeSwitches', ['enable-logging'])
+# Дополнительные опции, которые могут помочь (хотя uc.Chrome() уже делает многое)
+chrome_options_uc.add_argument("--disable-extensions")
+chrome_options_uc.add_argument("--hide-scrollbars")
+chrome_options_uc.add_argument("--mute-audio")
+chrome_options_uc.add_argument("--no-default-browser-check")
+chrome_options_uc.add_argument("--no-first-run")
+chrome_options_uc.add_argument("--disable-infobars")
 
 # --- ИНИЦИАЛИЗАЦИЯ CLOUDSCRAPER ---
 scraper = cloudscraper.create_scraper(
@@ -143,7 +137,6 @@ def parse_with_cloudscraper(article_url: str) -> Tuple[Optional[str], List[str]]
                 return full_text, image_urls
             else:
                 logging.warning(f"Cloudscraper extracted empty content for {article_url}")
-                # Возвращаем None, чтобы сигнализировать о неудаче и перейти к Selenium
                 return None, [] 
 
         except Exception as e:
@@ -157,15 +150,15 @@ def parse_with_cloudscraper(article_url: str) -> Tuple[Optional[str], List[str]]
     return None, []
 
 def parse_with_selenium(article_url: str) -> Tuple[Optional[str], List[str]]:
-    """Попытка извлечь статью с помощью Selenium."""
-    logging.info(f"Attempting to fetch with Selenium: {article_url}")
+    """Попытка извлечь статью с помощью Selenium с undetected_chromedriver."""
+    logging.info(f"Attempting to fetch with Selenium (undetected_chromedriver): {article_url}")
     driver = None
     try:
-        if CHROME_DRIVER_PATH:
-            service = Service(executable_path=CHROME_DRIVER_PATH)
-            driver = webdriver.Chrome(service=service, options=chrome_options)
-        else:
-            driver = webdriver.Chrome(options=chrome_options)
+        # --- Использование undetected_chromedriver ---
+        # headless=True: запускает браузер в безголовом режиме (без GUI)
+        # use_subprocess=True: может помочь в CI окружениях
+        # options=chrome_options_uc: передаем наши кастомные опции
+        driver = uc.Chrome(headless=True, use_subprocess=True, options=chrome_options_uc)
 
         # Установка таймаутов для Selenium
         driver.set_page_load_timeout(60) # Максимальное время на загрузку страницы
@@ -173,21 +166,14 @@ def parse_with_selenium(article_url: str) -> Tuple[Optional[str], List[str]]:
 
         driver.get(article_url)
 
-        # Выполняем JavaScript для удаления свойства navigator.webdriver
-        # Это должно выполняться после driver.get(), но до ожидания элементов
-        driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
-            'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
-        })
-        # Также можно выполнить после загрузки, но addScriptToEvaluateOnNewDocument гарантирует, что это будет до выполнения JS на странице
-        # driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-
-
+        # --- Эти строки больше не нужны, т.к. undetected_chromedriver сам патчит ---
+        # driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+        #     'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
+        # })
+        
         # Ждем, пока основной контентный div станет видимым/присутствующим на странице
-        # Увеличиваем таймаут ожидания элемента
-        WebDriverWait(driver, 45).until( # Увеличено с 20 до 45 секунд
+        WebDriverWait(driver, 45).until( # Увеличено до 45 секунд
             EC.presence_of_element_located((By.ID, "fck_detail"))
-            # Можно также попробовать EC.visibility_of_element_located
-            # или даже комбинацию: EC.presence_of_element_located((By.ID, "fck_detail")) and EC.text_to_be_present_in_element((By.ID, "fck_detail"), "some_expected_text")
         )
 
         page_source = driver.page_source
@@ -207,7 +193,7 @@ def parse_with_selenium(article_url: str) -> Tuple[Optional[str], List[str]]:
             return None, []
 
     except TimeoutException:
-        logging.error(f"Selenium Timeout: element #fck_detail not found or page load timed out for {article_url}. Retrying with different approach if possible or giving up.")
+        logging.error(f"Selenium Timeout: element #fck_detail not found or page load timed out for {article_url}. This might indicate strong bot detection.")
         return None, []
     except WebDriverException as e:
         logging.error(f"Selenium WebDriver Error for {article_url}: {e}", exc_info=True)
