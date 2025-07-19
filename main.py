@@ -20,7 +20,7 @@ from requests.exceptions import RequestException, Timeout as ReqTimeout
 
 os.environ["translators_default_region"] = "EN"
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s [%(levelname)s] %(message)s")
 
 OUTPUT_DIR = Path("articles")
 CATALOG_PATH = OUTPUT_DIR / "catalog.json"
