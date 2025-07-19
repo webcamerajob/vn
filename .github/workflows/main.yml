@@ -1,14 +1,14 @@
-name: Run Python Parser
+name: Run VnExpress Scraper
 
 on:
   schedule:
     # Запускать каждый день в 00:00 UTC
-    - cron: '0 0 * * *'
-  workflow_dispatch:
-    # Позволяет запускать вручную из интерфейса GitHub Actions
+    # Вы можете настроить расписание по своему усмотрению (например, каждые 12 часов)
+    - cron: '0 0 * * *' 
+  workflow_dispatch: # Позволяет запускать вручную из интерфейса GitHub Actions
 
 jobs:
-  parse_articles:
+  scrape:
     runs-on: ubuntu-latest
 
     steps:
@@ -18,49 +18,20 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
-        python-version: '3.9' # Используем Python 3.9, так как он хорошо работает с undetected_chromedriver
+        python-version: '3.9'
 
-    - name: Install system dependencies for Chrome
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y google-chrome-stable # Убедимся, что Google Chrome установлен
-        google-chrome --version # Выводим версию Chrome. Полезно для отладки, если версия изменится.
-        
-    - name: Install Python dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt # Убедитесь, что ваш файл называется именно 'requirements.txt'
-      
-    - name: Download specific ChromeDriver
-      run: |
-        # ВАЖНО: Эта версия ChromeDriver ДОЛЖНА СОВПАДАТЬ с версией Chrome, установленной выше (138.0.7204.100).
-        # Если GitHub Actions обновит Chrome в будущем, вам придется обновить CHROME_DRIVER_VERSION здесь.
-        CHROME_DRIVER_VERSION="138.0.7204.100" 
-        CHROME_DRIVER_URL="https://edgedl.me.gvt1.com/edgedl/chrome/chrome-for-testing/${CHROME_DRIVER_VERSION}/linux64/chromedriver-linux64.zip"
-        
-        echo "Downloading ChromeDriver from: $CHROME_DRIVER_URL"
-        wget -N "$CHROME_DRIVER_URL" -P /tmp # Скачиваем архив в /tmp
-        unzip -o /tmp/chromedriver-linux64.zip -d /tmp/chromedriver_dir # Распаковываем в отдельную директорию
-        
-        # Перемещаем исполняемый файл ChromeDriver в /usr/local/bin, чтобы он был в PATH и доступен
-        sudo mv /tmp/chromedriver_dir/chromedriver-linux64 /usr/local/bin/chromedriver
-        sudo chmod +x /usr/local/bin/chromedriver # Делаем файл исполняемым
-        
-        echo "ChromeDriver version installed:"
-        chromedriver --version # Проверяем установленную версию ChromeDriver
-      
-    - name: Run parser (DEBUG MODE: output directly to console)
-      # Если вы используете WireGuard, раскомментируйте следующую строку и убедитесь, что WG_CONFIG настроен в Secrets.
-      # env:
-      #   WG_CONFIG: ${{ secrets.WG_CONFIG }} 
-      run: |
-        # ВРЕМЕННО: УБИРАЕМ ПЕРЕНАПРАВЛЕНИЕ В ФАЙЛ, ЧТОБЫ УВИДЕТЬ ВСЕ ЛОГИ НАПРЯМУЮ В КОНСОЛИ GITHUB ACTIONS
-        python main.py --rss-url https://e.vnexpress.net/rss/news.rss --limit 5 
+    - name: Install dependencies
+      run: pip install -r requirements.txt
 
-    - name: Get new_articles_found status (Temporarily set to false, for debugging)
-      id: get_status
+    - name: Run scraper
+      run: python vnexpress_parser.py
+
+    - name: Commit and push changes
       run: |
-        # Этот шаг теперь не будет читать из файла, а просто установит статус на 'false',
-        # так как мы отключили перенаправление в 'parser_output.log' для отладки.
-        echo "new_articles_found=false" >> "$GITHUB_OUTPUT"
-      shell: bash
+        git config user.name "GitHub Actions Bot"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add vnexpress_articles.json vnexpress_parser.log
+        git commit -m "Automated: Update VnExpress articles" || echo "No changes to commit"
+        git push origin main || echo "No new data to push"
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
