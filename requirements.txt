@@ -1,8 +1,3 @@
-requests
-beautifulsoup4
-httpx
-cloudscraper
-translators
-feedparser
-selenium
-undetected-chromedriver
+requests==2.32.3
+beautifulsoup4==4.12.3
+PyYAML==6.0.1
