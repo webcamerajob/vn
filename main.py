@@ -33,21 +33,7 @@ SCRAPER_TIMEOUT = 30 # Увеличиваем общий таймаут для �
 
 # --- КОНФИГУРАЦИЯ SELENIUM (для undetected_chromedriver) ---
 # CHROME_DRIVER_PATH = None # uc.Chrome() сам скачивает драйвер, поэтому это остается None
-# Стандартные Chrome Options, которые все еще могут быть полезны, но uc.Chrome() многие из них уже учитывает
-chrome_options_uc = Options()
-chrome_options_uc.add_argument("--no-sandbox")
-chrome_options_uc.add_argument("--disable-dev-shm-usage")
-chrome_options_uc.add_argument("--disable-gpu")
-chrome_options_uc.add_argument("--window-size=1920,1080")
-chrome_options_uc.add_argument("--incognito")
-chrome_options_uc.add_experimental_option('excludeSwitches', ['enable-logging'])
-# Дополнительные опции, которые могут помочь (хотя uc.Chrome() уже делает многое)
-chrome_options_uc.add_argument("--disable-extensions")
-chrome_options_uc.add_argument("--hide-scrollbars")
-chrome_options_uc.add_argument("--mute-audio")
-chrome_options_uc.add_argument("--no-default-browser-check")
-chrome_options_uc.add_argument("--no-first-run")
-chrome_options_uc.add_argument("--disable-infobars")
+# ГЛОБАЛЬНЫЙ ОБЪЕКТ chrome_options_uc УДАЛЕН. Он будет создаваться в функции parse_with_selenium.
 
 # --- ИНИЦИАЛИЗАЦИЯ CLOUDSCRAPER ---
 scraper = cloudscraper.create_scraper(
@@ -154,11 +140,27 @@ def parse_with_selenium(article_url: str) -> Tuple[Optional[str], List[str]]:
     logging.info(f"Attempting to fetch with Selenium (undetected_chromedriver): {article_url}")
     driver = None
     try:
-        # --- Использование undetected_chromedriver ---
+        # --- ИНИЦИАЛИЗАЦИЯ CHROMEOPTIONS ПЕРЕМЕЩЕНА ВНУТРЬ ФУНКЦИИ ---
+        # Создавайте новый объект Options каждый раз, когда функция вызывается
+        local_chrome_options_uc = Options()
+        local_chrome_options_uc.add_argument("--no-sandbox")
+        local_chrome_options_uc.add_argument("--disable-dev-shm-usage")
+        local_chrome_options_uc.add_argument("--disable-gpu")
+        local_chrome_options_uc.add_argument("--window-size=1920,1080")
+        local_chrome_options_uc.add_argument("--incognito")
+        local_chrome_options_uc.add_experimental_option('excludeSwitches', ['enable-logging'])
+        local_chrome_options_uc.add_argument("--disable-extensions")
+        local_chrome_options_uc.add_argument("--hide-scrollbars")
+        local_chrome_options_uc.add_argument("--mute-audio")
+        local_chrome_options_uc.add_argument("--no-default-browser-check")
+        local_chrome_options_uc.add_argument("--no-first-run")
+        local_chrome_options_uc.add_argument("--disable-infobars")
+        # --- КОНЕЦ ИНИЦИАЛИЗАЦИИ CHROMEOPTIONS ---
+
         # headless=True: запускает браузер в безголовом режиме (без GUI)
         # use_subprocess=True: может помочь в CI окружениях
-        # options=chrome_options_uc: передаем наши кастомные опции
-        driver = uc.Chrome(headless=True, use_subprocess=True, options=chrome_options_uc)
+        # options=local_chrome_options_uc: передаем наш свежий объект опций
+        driver = uc.Chrome(headless=True, use_subprocess=True, options=local_chrome_options_uc)
 
         # Установка таймаутов для Selenium
         driver.set_page_load_timeout(60) # Максимальное время на загрузку страницы
