@@ -1,9 +1,15 @@
 import logging
 import time
+import json
+import os
+import re
 from typing import Optional, List, Tuple
+
+# Импорты для Cloudscraper
 import cloudscraper
 from bs4 import BeautifulSoup
 
+# Импорты для Selenium
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
@@ -20,12 +26,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 # --- КОНФИГУРАЦИЯ ПАРСЕРА ---
 MAX_RETRIES = 3
 BASE_DELAY = 1.0
-SCRAPER_TIMEOUT = 15
+SCRAPER_TIMEOUT = 30 # Увеличиваем общий таймаут для запросов
 
 # --- КОНФИГУРАЦИЯ SELENIUM ---
 # Укажите путь к вашему chromedriver.exe или geckodriver.exe
-# Если драйвер находится в PATH, можете установить None
-CHROME_DRIVER_PATH = None  # Например: 'C:/path/to/chromedriver.exe' или '/usr/local/bin/chromedriver'
+# Если драйвер находится в PATH (как при установке через GitHub Actions), можете установить None
+CHROME_DRIVER_PATH = None
 
 chrome_options = Options()
 chrome_options.add_argument("--headless")  # Запуск в безголовом режиме (без графического интерфейса)
@@ -34,8 +40,20 @@ chrome_options.add_argument("--disable-dev-shm-usage")
 chrome_options.add_argument("--disable-gpu")
 chrome_options.add_argument("--window-size=1920,1080")
 chrome_options.add_argument("--incognito")
-# Отключить логи Selenium, чтобы они не загромождали ваш лог
 chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
+
+# --- Добавлено для анти-детектирования ---
+chrome_options.add_argument("--disable-blink-features=AutomationControlled") # Отключает свойство navigator.webdriver
+# Использование актуального User-Agent
+chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+# Дополнительные опции для уменьшения заметности
+chrome_options.add_argument("--disable-extensions")
+chrome_options.add_argument("--hide-scrollbars")
+chrome_options.add_argument("--mute-audio")
+chrome_options.add_argument("--no-default-browser-check")
+chrome_options.add_argument("--no-first-run")
+chrome_options.add_argument("--disable-infobars")
+
 
 # --- ИНИЦИАЛИЗАЦИЯ CLOUDSCRAPER ---
 scraper = cloudscraper.create_scraper(
@@ -53,41 +71,50 @@ def _extract_content_and_images(soup: BeautifulSoup, article_url: str) -> Tuple[
     full_text_parts = []
     image_urls = []
 
+    # Ищем основной контент-блок
     content_div = soup.select_one('div#fck_detail, article.fck_detail, div.detail-content, div.main_content_detail')
 
+    # Дополнительные селекторы для фото-историй или других типов статей, если основной не найден
     if not content_div:
         content_div = soup.select_one('div.box_category_show, div.wrapper_detail_photo_story')
 
     if content_div:
         logging.debug(f"Found main/photo content div for {article_url}")
         # Извлечение всех параграфов и элементов, содержащих текст
+        # Используем find_all(['p', 'h2', 'h3', 'li', 'div']) для более широкого охвата текстовых элементов
         for p_tag in content_div.find_all(['p', 'h2', 'h3', 'li', 'div'], recursive=True):
+            # Пропускаем параграфы, содержащие только жирный текст (обычно это подписи к фото)
             if p_tag.name == 'p' and p_tag.find('strong') and p_tag.get_text(strip=True) == p_tag.find('strong').get_text(strip=True):
-                # Пропускаем параграфы, содержащие только жирный текст (обычно это подписи к фото)
                 continue
+            # Избегаем дублирования, если родительский div уже является основным контентом
             if p_tag.name == 'div' and ('detail-content' in p_tag.get('class', []) or 'fck_detail' in p_tag.get('class', [])):
                 continue
             
             text = p_tag.get_text(separator=' ', strip=True)
+            # Фильтруем подписи к фото/видео, которые могут быть ошибочно захвачены
             if text and not text.lower().startswith("photo:") and not text.lower().startswith("video:"):
                 full_text_parts.append(text)
 
-        # Извлечение изображений
+        # --- Извлечение изображений ---
         image_tags = content_div.find_all('img') if content_div else []
-        if not image_tags:
-             image_tags = soup.select('div.item_photo_detail img, .vne_lazy_image, .thumb_art img')
+        # Дополнительные селекторы для изображений, если не нашлись в content_div
+        if not image_tags: 
+             image_tags = soup.select('div.item_photo_detail img, .vne_lazy_image, .thumb_art img, picture img')
         
         for img_tag in image_tags:
             src = img_tag.get('data-src') or img_tag.get('src')
             if src and src.startswith(('http', '//')):
                 if src.startswith('//'):
                     src = 'https:' + src
-                if "?" in src: # Удаляем параметры после '?' для получения чистого URL
+                # Удаляем параметры размера и хеш после '?', чтобы получить базовый URL
+                if "?" in src:
                     src = src.split('?')[0]
                 image_urls.append(src)
         
-        image_urls = list(dict.fromkeys(image_urls)) # Удаляем дубликаты
+        # Удаляем дубликаты URL изображений
+        image_urls = list(dict.fromkeys(image_urls))
         full_text = "\n\n".join(full_text_parts)
+        
     else:
         logging.warning(f"Could not find any suitable content div in parsed HTML for {article_url}")
         full_text = ""
@@ -105,8 +132,8 @@ def parse_with_cloudscraper(article_url: str) -> Tuple[Optional[str], List[str]]
             r.raise_for_status()
             
             # Для отладки: если уровень логирования DEBUG, выводим часть HTML
-            # if logging.root.level <= logging.DEBUG:
-            #     logging.debug(f"Cloudscraper Raw HTML for {article_url} (first 5000 chars):\n{r.text[:5000]}...")
+            if logging.root.level <= logging.DEBUG:
+                logging.debug(f"Cloudscraper Raw HTML for {article_url} (first 5000 chars):\n{r.text[:5000]}...")
             
             soup = BeautifulSoup(r.text, 'html.parser')
             full_text, image_urls = _extract_content_and_images(soup, article_url)
@@ -116,7 +143,8 @@ def parse_with_cloudscraper(article_url: str) -> Tuple[Optional[str], List[str]]
                 return full_text, image_urls
             else:
                 logging.warning(f"Cloudscraper extracted empty content for {article_url}")
-                return None, [] # Возвращаем None, чтобы сигнализировать о неудаче
+                # Возвращаем None, чтобы сигнализировать о неудаче и перейти к Selenium
+                return None, [] 
 
         except Exception as e:
             delay = BASE_DELAY * 2 ** (attempt - 1)
@@ -139,18 +167,34 @@ def parse_with_selenium(article_url: str) -> Tuple[Optional[str], List[str]]:
         else:
             driver = webdriver.Chrome(options=chrome_options)
 
+        # Установка таймаутов для Selenium
+        driver.set_page_load_timeout(60) # Максимальное время на загрузку страницы
+        driver.set_script_timeout(30)    # Максимальное время для выполнения асинхронных скриптов
+
         driver.get(article_url)
 
-        # Ждем, пока основной контентный div появится на странице
-        WebDriverWait(driver, SCRAPER_TIMEOUT).until(
+        # Выполняем JavaScript для удаления свойства navigator.webdriver
+        # Это должно выполняться после driver.get(), но до ожидания элементов
+        driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+            'source': 'Object.defineProperty(navigator, "webdriver", {get: () => undefined})'
+        })
+        # Также можно выполнить после загрузки, но addScriptToEvaluateOnNewDocument гарантирует, что это будет до выполнения JS на странице
+        # driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
+
+        # Ждем, пока основной контентный div станет видимым/присутствующим на странице
+        # Увеличиваем таймаут ожидания элемента
+        WebDriverWait(driver, 45).until( # Увеличено с 20 до 45 секунд
             EC.presence_of_element_located((By.ID, "fck_detail"))
+            # Можно также попробовать EC.visibility_of_element_located
+            # или даже комбинацию: EC.presence_of_element_located((By.ID, "fck_detail")) and EC.text_to_be_present_in_element((By.ID, "fck_detail"), "some_expected_text")
         )
 
         page_source = driver.page_source
         
         # Для отладки: если уровень логирования DEBUG, выводим часть HTML
-        # if logging.root.level <= logging.DEBUG:
-        #     logging.debug(f"Selenium Raw HTML for {article_url} (first 5000 chars):\n{page_source[:5000]}...")
+        if logging.root.level <= logging.DEBUG:
+            logging.debug(f"Selenium Raw HTML for {article_url} (first 5000 chars):\n{page_source[:5000]}...")
 
         soup = BeautifulSoup(page_source, 'html.parser')
         full_text, image_urls = _extract_content_and_images(soup, article_url)
@@ -163,17 +207,17 @@ def parse_with_selenium(article_url: str) -> Tuple[Optional[str], List[str]]:
             return None, []
 
     except TimeoutException:
-        logging.error(f"Selenium Timeout: element #fck_detail not found for {article_url}")
+        logging.error(f"Selenium Timeout: element #fck_detail not found or page load timed out for {article_url}. Retrying with different approach if possible or giving up.")
         return None, []
     except WebDriverException as e:
-        logging.error(f"Selenium WebDriver Error for {article_url}: {e}")
+        logging.error(f"Selenium WebDriver Error for {article_url}: {e}", exc_info=True)
         return None, []
     except Exception as e:
         logging.error(f"Selenium failed for {article_url}: {e}", exc_info=True)
         return None, []
     finally:
         if driver:
-            driver.quit()
+            driver.quit() # Важно закрывать браузер после использования
 
 # --- ОСНОВНАЯ ФУНКЦИЯ ДЛЯ ЗАПУСКА ПАРСИНГА ---
 
@@ -197,33 +241,113 @@ def get_article_content(article_url: str) -> Tuple[Optional[str], List[str]]:
     logging.error(f"Failed to get content for {article_url} with all methods.")
     return None, []
 
-# --- ПРИМЕР ИСПОЛЬЗОВАНИЯ ---
+# --- ГЛАВНАЯ ЛОГИКА (Если запускается как основной скрипт) ---
 if __name__ == "__main__":
-    test_urls = [
-        "https://e.vnexpress.net/news/news/malaysian-police-arrest-20-men-in-late-night-gay-party-raid-4915665.html",
-        "https://e.vnexpress.net/news/news/traffic/hanoi-car-driver-causing-deadly-crash-says-he-was-drowsy-after-drinking-4915602.html",
-        "https://e.vnexpress.net/news/news/cambodia-to-mandate-military-service-from-2026-4914835.html",
-        "https://e.vnexpress.net/news/news/buffalo-breaks-woman-s-ribs-in-shocking-street-attack-in-vietnam-4914770.html",
-        # Добавьте сюда другие URL-ы для тестирования
-    ]
+    import argparse
 
-    for url in test_urls:
-        print(f"\n--- Processing URL: {url} ---")
-        article_text, article_images = get_article_content(url)
+    parser = argparse.ArgumentParser(description="Parse articles from an RSS feed.")
+    parser.add_argument("--rss-url", type=str, required=True, help="URL of the RSS feed to parse.")
+    parser.add_argument("-l", "--lang", type=str, default="en", help="Language code (e.g., 'ru', 'en').")
+    parser.add_argument("-n", "--num-articles", type=int, default=5, help="Number of articles to process from the RSS feed.")
+    parser.add_argument("--limit", type=int, default=30, help="Maximum number of articles to process per run.")
+    parser.add_argument("--posted-state-file", type=str, default="articles/posted.json", help="Path to the JSON file storing IDs of already posted articles.")
 
-        if article_text:
-            logging.info(f"Successfully extracted text from {url}. Length: {len(article_text)} chars.")
-            # print("--- Extracted Text (first 500 chars) ---")
-            # print(article_text[:500])
-            # print("...")
-        else:
-            logging.error(f"Failed to extract text from {url}.")
+    args = parser.parse_args()
 
-        if article_images:
-            logging.info(f"Successfully extracted {len(article_images)} images from {url}.")
-            # print("--- Extracted Images ---")
-            # for img in article_images:
-            #     print(img)
-        else:
-            logging.error(f"Failed to extract images from {url}.")
-        print("--------------------------------------")
+    RSS_URL = args.rss_url
+    TARGET_LANG = args.lang
+    NUM_ARTICLES_FROM_RSS = args.num_articles
+    BATCH_LIMIT = args.limit
+    POSTED_STATE_FILE = args.posted_state_file
+
+    def get_posted_article_ids(file_path: str) -> set:
+        if not os.path.exists(file_path):
+            return set()
+        with open(file_path, 'r', encoding='utf-8') as f:
+            try:
+                return set(json.load(f))
+            except json.JSONDecodeError:
+                logging.warning(f"Error decoding {file_path}. Starting with empty posted set.")
+                return set()
+
+    def add_posted_article_id(file_path: str, article_id: str):
+        posted_ids = get_posted_article_ids(file_path)
+        posted_ids.add(article_id)
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(list(posted_ids), f, indent=4)
+
+    posted_ids = get_posted_article_ids(POSTED_STATE_FILE)
+    new_articles_found_status = False
+    processed_count = 0
+
+    logging.info(f"Starting RSS feed processing for: {RSS_URL}")
+    logging.info(f"Already posted articles count: {len(posted_ids)}")
+
+    try:
+        # Используем Cloudscraper для получения RSS-ленты, т.к. там нет JS
+        rss_response = scraper.get(RSS_URL, timeout=SCRAPER_TIMEOUT)
+        rss_response.raise_for_status()
+        rss_soup = BeautifulSoup(rss_response.text, 'xml') # RSS - это XML
+
+        items = rss_soup.find_all('item')
+        logging.info(f"Found {len(items)} items in RSS feed.")
+
+        for item in items:
+            if processed_count >= BATCH_LIMIT:
+                logging.info(f"Batch limit of {BATCH_LIMIT} reached. Stopping processing new articles from RSS.")
+                break
+
+            link = item.find('link').text
+            title = item.find('title').text
+            pub_date_str = item.find('pubDate').text
+            
+            # Извлекаем ID из URL
+            match = re.search(r'-(\d+)\.html', link)
+            article_id = match.group(1) if match else link # Используем ссылку как ID, если не можем извлечь числовой ID
+
+            if article_id in posted_ids:
+                logging.info(f"Article '{title}' (ID: {article_id}) already posted. Skipping.")
+                continue
+
+            logging.info(f"New article found: '{title}' (ID: {article_id})")
+            
+            # --- Основной вызов функции парсинга ---
+            article_text, article_images = get_article_content(link)
+
+            if article_text and article_text.strip():
+                # Сохранение статьи в JSON
+                output_dir = "articles"
+                os.makedirs(output_dir, exist_ok=True)
+                
+                # Добавляем штамп времени для уникальности файла
+                timestamp = int(time.time())
+                output_filename = os.path.join(output_dir, f"{article_id}_{timestamp}.json")
+                
+                article_data = {
+                    "id": article_id,
+                    "title": title,
+                    "url": link,
+                    "pubDate": pub_date_str,
+                    "text": article_text,
+                    "images": article_images
+                }
+                
+                with open(output_filename, 'w', encoding='utf-8') as f:
+                    json.dump(article_data, f, ensure_ascii=False, indent=4)
+                
+                logging.info(f"Article '{title}' saved to {output_filename}")
+                new_articles_found_status = True
+                add_posted_article_id(POSTED_STATE_FILE, article_id)
+                processed_count += 1
+                time.sleep(BASE_DELAY) # Задержка между обработкой статей
+
+            else:
+                logging.warning(f"Could not extract content for article '{title}' (ID: {article_id}). Skipping.")
+
+    except Exception as e:
+        logging.error(f"Error during RSS feed processing: {e}", exc_info=True)
+
+    # Вывод статуса для GitHub Actions
+    print(f"NEW_ARTICLES_STATUS:{'true' if new_articles_found_status else 'false'}")
+    logging.info("→ PARSER RUN COMPLETE")
