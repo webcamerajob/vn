@@ -26,13 +26,16 @@ MAX_RETRIES   = 3
 RETRY_DELAY   = 5.0
 DEFAULT_DELAY = 10.0 # Изменен с 5.0 на 10.0, как в вашей версии
 
-def escape_markdown(text: str) -> str:
+def escape_html(text: str) -> str:
     """
-    Экранирует спецсимволы для MarkdownV2, кроме звездочки (*), которая используется для жирного текста.
+    Экранирует спецсимволы HTML (<, >, &, ") для корректного отображения в Telegram с parse_mode='HTML'.
     """
-    # Удаляем '*' из списка символов для экранирования, так как он будет использоваться для жирного текста.
-    markdown_chars = r'\_[]()~`>#+-=|{}.!'
-    return re.sub(r'([%s])' % re.escape(markdown_chars), r'\\\1', text)
+    # Заменяем символы на их HTML-сущности
+    text = text.replace("&", "&amp;")  # '&' должен быть первым, чтобы не экранировать уже экранированные сущности
+    text = text.replace("<", "&lt;")
+    text = text.replace(">", "&gt;")
+    text = text.replace('"', "&quot;")
+    return text
 
 def chunk_text(text: str, size: int = 4096) -> List[str]:
     """
@@ -179,10 +182,11 @@ async def send_media_group(
     client: httpx.AsyncClient,
     token: str,
     chat_id: str,
-    images: List[Path]
+    images: List[Path],
+    caption: Optional[str] = None # Добавлен аргумент для подписи
 ) -> bool:
     """
-    Отправляет альбом фотографий без подписи.
+    Отправляет альбом фотографий с (опциональной) подписью.
     Все изображения проходят через apply_watermark.
     ДОПОЛНЕНИЯ: Ограничение на 10 изображений для медиагруппы Telegram.
     """
@@ -207,10 +211,15 @@ async def send_media_group(
 
             key = f"file{idx}"
             files[key] = (img_path.name, image_bytes, "image/png") # img_path.name для имени файла
-            media.append({
+
+            media_item = {
                 "type": "photo",
-                "media": f"attach://{key}"
-            })
+                "media": f"attach://{key}",
+                "parse_mode": "HTML" # Указываем parse_mode для подписи, если она будет
+            }
+            if idx == 0 and caption: # Подпись только для первого элемента
+                media_item["caption"] = caption
+            media.append(media_item)
             photo_count += 1
         except Exception as e:
             logging.error(f"Error processing image {img_path} for media group: {e}")
@@ -234,13 +243,13 @@ async def send_message(
     text: str
 ) -> bool:
     """
-    Отправляет текстовое сообщение с разбором MarkdownV2.
+    Отправляет текстовое сообщение с разбором HTML.
     """
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     data = {
         "chat_id": chat_id,
-        "text": escape_markdown(text),
-        "parse_mode": "MarkdownV2",
+        "text": escape_html(text), # Экранируем текст для HTML
+        "parse_mode": "HTML",      # Указываем HTML-форматирование
         "disable_web_page_preview": True # Обычно полезно для статей
     }
     return await _post_with_retry(client, "POST", url, data)
@@ -309,8 +318,17 @@ def validate_article(
 
 
     # Подпись для медиагруппы/сообщения (ограничение 1024 символа для медиагрупп, для сообщений 4096)
-    # Здесь используется для общей подписи, которая может быть заголовком
-    cap = title if len(title) <= 1024 else title[:1023] + "…" # Обрезаем с многоточием для подписи к медиа
+    # Заголовок оборачиваем в <b> и экранируем
+    html_title = f"<b>{escape_html(title)}</b>"
+    # Обрезаем с многоточием для подписи к медиа (с учетом тегов)
+    # Здесь нужно быть осторожным с обрезкой HTML, лучше обрезать сырой текст, потом добавлять HTML
+    # Максимальная длина caption в Telegram - 1024 символа.
+    # Если заголовок очень длинный, мы обрезаем его "сырой" вариант,
+    # а потом добавляем HTML-теги.
+    caption_raw = title
+    if len(caption_raw) > 1020: # 1024 - длина, 4 символа для "..."
+        caption_raw = caption_raw[:1017] + "..."
+    cap = f"<b>{escape_html(caption_raw)}</b>"
     
     return cap, text_path, valid_imgs
 
@@ -427,7 +445,7 @@ async def main(parsed_dir: str, state_path: str, limit: Optional[int]):
     token       = os.getenv("TELEGRAM_TOKEN")
     chat_id     = os.getenv("TELEGRAM_CHANNEL")
     if not token or not chat_id:
-        logging.error("TELEGRAM_TOKEN or TELEGRAM_CHANNEL environment variables must be set.")
+        logging.error("TELEGRAM_TOKEN или TELEGRAM_CHANNEL переменные окружения должны быть установлены.")
         return
 
     delay       = float(os.getenv("POST_DELAY", DEFAULT_DELAY))
@@ -435,12 +453,12 @@ async def main(parsed_dir: str, state_path: str, limit: Optional[int]):
     state_file  = Path(state_path)
 
     if not parsed_root.is_dir():
-        logging.error("Parsed directory %s does not exist. Exiting.", parsed_root)
+        logging.error("Директория %s не существует. Выход.", parsed_root)
         return
 
     # 1) Загрузка уже опубликованных ID
     posted_ids_old = load_posted_ids(state_file)
-    logging.info("Loaded %d previously posted IDs from %s.", len(posted_ids_old), state_file.name)
+    logging.info("Загружено %d ранее опубликованных ID из %s.", len(posted_ids_old), state_file.name)
 
     # 2) Сбор папок со статьями и их валидация
     articles_to_post: List[Dict[str, Any]] = []
@@ -456,31 +474,31 @@ async def main(parsed_dir: str, state_path: str, limit: Optional[int]):
                         # Добавляем ID в данные, чтобы передать его дальше
                         validated_data_dict = {
                             "id": art_meta["id"],
-                            "caption": validated_data[0],
+                            "caption": validated_data[0], # Теперь это HTML-заголовок
                             "text_path": validated_data[1],
                             "image_paths": validated_data[2]
                         }
                         articles_to_post.append(validated_data_dict)
                     else:
-                        logging.warning("Article metadata validation failed for %s. Skipping.", d.name)
+                        logging.warning("Валидация метаданных статьи не удалась для %s. Пропускаем.", d.name)
                 elif art_meta.get("id") is not None:
-                    logging.debug("Skipping already posted article ID=%s.", art_meta["id"])
+                    logging.debug("Пропускаем уже опубликованную статью ID=%s.", art_meta["id"])
                 else:
-                    logging.warning("Article in %s has no ID in meta.json. Skipping.", d.name)
+                    logging.warning("Статья в %s не имеет ID в meta.json. Пропускаем.", d.name)
             except json.JSONDecodeError as e:
-                logging.warning("Cannot load or parse meta.json in %s: %s. Skipping.", d.name, e)
+                logging.warning("Не удается загрузить или разобрать meta.json в %s: %s. Пропускаем.", d.name, e)
             except Exception as e:
-                logging.error("An unexpected error occurred while processing article %s: %s. Skipping.", d.name, e)
+                logging.error("Произошла непредвиденная ошибка при обработке статьи %s: %s. Пропускаем.", d.name, e)
     
     # Сортируем статьи по ID для стабильного порядка обработки
     # Предполагаем, что article["id"] является числом
     articles_to_post.sort(key=lambda x: x["id"])
 
     if not articles_to_post:
-        logging.info("🔍 No new articles to post. Exiting.")
+        logging.info("🔍 Нет новых статей для публикации. Выход.")
         return
 
-    logging.info("Found %d new articles to consider for posting.", len(articles_to_post))
+    logging.info("Найдено %d новых статей для рассмотрения к публикации.", len(articles_to_post))
 
     client    = httpx.AsyncClient()
     sent      = 0
@@ -489,40 +507,45 @@ async def main(parsed_dir: str, state_path: str, limit: Optional[int]):
     # 3) Публикация каждой статьи
     for article in articles_to_post:
         if limit is not None and sent >= limit:
-            logging.info("Batch limit of %d reached. Stopping.", limit)
+            logging.info("Лимит пачки в %d достигнут. Остановка.", limit)
             break
 
         aid       = article["id"]
-        caption   = article["caption"]
+        caption   = article["caption"] # Теперь это HTML-заголовок
         text_path = article["text_path"]
         image_paths = article["image_paths"]
 
-        logging.info("Attempting to post ID=%s", aid)
+        logging.info("Попытка публикации ID=%s", aid)
         
         posted_successfully = False
         try:
             # 3.1) Отправляем изображения (если есть).
+            # Заголовок отправляется как подпись к первой картинке медиагруппы
             if image_paths:
-                if not await send_media_group(client, token, chat_id, image_paths):
-                    logging.warning("Failed to send media group for ID=%s. Proceeding to send text only (title already in text).", aid)
+                if not await send_media_group(client, token, chat_id, image_paths, caption=caption):
+                    logging.warning("Не удалось отправить медиагруппу для ID=%s. Продолжаем отправлять только текст (заголовок будет в тексте).", aid)
                     # Если медиагруппа не отправлена, пропускаем отправку отдельного заголовка.
                     # Переходим сразу к отправке основного текста.
                 else:
                     # Если медиагруппа отправлена, здесь НЕ отправляем заголовок как отдельное сообщение.
-                    # Ничего не делаем, так как заголовок не должен отправляться отдельно.
+                    # Ничего не делаем, так как заголовок уже был отправлен как подпись к медиа.
                     pass
             else:
-                # Если изображений нет совсем, НЕ отправляем заголовок как отдельное сообщение.
-                logging.info("No images for ID=%s. Proceeding to send text only (title already in text).", aid)
-                # Переходим сразу к отправке основного текста.
+                # Если изображений нет совсем, отправляем заголовок как первое текстовое сообщение.
+                logging.info("Нет изображений для ID=%s. Отправляем заголовок как первое сообщение, затем текст.", aid)
+                if not await send_message(client, token, chat_id, caption):
+                    logging.error("Не удалось отправить заголовок статьи ID=%s. Пропускаем всю статью.", aid)
+                    continue # Пропускаем статью, если заголовок не отправился
             
             # 3.2) Тело статьи по чанкам
             raw_text = text_path.read_text(encoding="utf-8")
             chunks = chunk_text(raw_text)
             all_chunks_sent = True
             for part in chunks:
+                # В этом месте chunk_text возвращает "сырой" текст.
+                # Он будет экранирован функцией send_message.
                 if not await send_message(client, token, chat_id, part):
-                    logging.error("Failed to send a text chunk for ID=%s. Skipping remaining chunks and article.", aid)
+                    logging.error("Не удалось отправить текстовый чанк для ID=%s. Пропускаем оставшиеся чанки и статью.", aid)
                     all_chunks_sent = False
                     break
             
@@ -530,13 +553,13 @@ async def main(parsed_dir: str, state_path: str, limit: Optional[int]):
                 posted_successfully = True
 
         except Exception as e:
-            logging.error(f"❌ An error occurred during posting article ID={aid}: {e}. Moving to next article.")
+            logging.error(f"❌ Произошла ошибка во время публикации статьи ID={aid}: {e}. Переход к следующей статье.")
             posted_successfully = False # Убедимся, что флаг сброшен при ошибке
 
         if posted_successfully:
             new_ids.add(aid) # Добавляем в Set новых успешно опубликованных ID
             sent += 1
-            logging.info("✅ Posted ID=%s", aid)
+            logging.info("✅ Опубликовано ID=%s", aid)
         
         await asyncio.sleep(delay)
 
@@ -546,8 +569,8 @@ async def main(parsed_dir: str, state_path: str, limit: Optional[int]):
     # Объединяем старые опубликованные ID с новыми, успешно опубликованными в этом запуске
     all_ids_to_save = posted_ids_old.union(new_ids)
     save_posted_ids(all_ids_to_save, state_file)
-    logging.info("State updated. Total unique IDs to be saved: %d.", len(all_ids_to_save))
-    logging.info("📢 Done: sent %d articles in this run.", sent)
+    logging.info("Состояние обновлено. Всего уникальных ID для сохранения: %d.", len(all_ids_to_save))
+    logging.info("📢 Завершено: отправлено %d статей в этом запуске.", sent)
 
 if __name__ == "__main__":
 
