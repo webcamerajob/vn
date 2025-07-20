@@ -515,9 +515,8 @@ async def main(parsed_dir: str, state_path: str, limit: Optional[int]):
                     keyboard = {
                         "inline_keyboard": [
                             [
-                                {"text": "Обмен валют", "callback_data": "button_exchange_rates"},
-                                {"text": "Отзывы", "callback_data": "button_reviews"},
-                                {"text": "Реклама", "callback_data": "button_ads"}
+                                {"text": "Обмен валют", "url": "@mister1dollar"},
+                                {"text": "Отзывы", "url": "@feedback1dollar"}
                             ]
                         ]
                     }
