@@ -170,7 +170,7 @@ async def send_media_group(
     client: httpx.AsyncClient,
     token: str,
     chat_id: str,
-    images: List[Path] # Подпись удалена
+    images: List[Path]
 ) -> bool:
     """
     Отправляет альбом фотографий без подписи (подпись будет в первом текстовом чанке).
@@ -202,7 +202,6 @@ async def send_media_group(
             media_item = {
                 "type": "photo",
                 "media": f"attach://{key}"
-                # 'caption' и 'parse_mode' для подписи удалены из медиа-элемента
             }
             media.append(media_item)
             photo_count += 1
@@ -224,8 +223,8 @@ async def send_message(
     client: httpx.AsyncClient,
     token: str,
     chat_id: str,
-    text: str, # Этот текст теперь должен быть полностью HTML-готовым
-    reply_markup: Optional[Dict[str, Any]] = None # Добавлен новый параметр для кнопок
+    text: str,
+    reply_markup: Optional[Dict[str, Any]] = None
 ) -> bool:
     """
     Отправляет текстовое сообщение с разбором HTML.
@@ -239,7 +238,7 @@ async def send_message(
         "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
-    if reply_markup: # Если клавиатура передана, добавляем её
+    if reply_markup:
         data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
     return await _post_with_retry(client, "POST", url, data)
 
@@ -247,13 +246,14 @@ async def send_message(
 def validate_article(
     art: Dict[str, Any],
     article_dir: Path
-) -> Optional[Tuple[str, Path, List[Path]]]:
+) -> Optional[Tuple[str, Path, List[Path], str]]: # Добавлен возврат оригинального заголовка
     """
     Проверяет структуру папки статьи и возвращает подготовленные данные.
-    Возвращает HTML-отформатированный заголовок, путь к текстовому файлу и список путей к изображениям.
+    Возвращает HTML-отформатированный заголовок, путь к текстовому файлу,
+    список путей к изображениям и ОРИГИНАЛЬНЫЙ неформатированный заголовок.
     """
     aid      = art.get("id")
-    title    = art.get("title", "").strip()
+    title    = art.get("title", "").strip() # Оригинальный, неформатированный заголовок
     txt_name = Path(art.get("text_file", "")).name if art.get("text_file") else None
 
     if not title:
@@ -283,7 +283,6 @@ def validate_article(
 
     # Сбор картинок
     valid_imgs: List[Path] = []
-    # Сначала проверяем пути из meta.json
     for name in art.get("images", []):
         p = article_dir / Path(name).name
         if not p.is_file():
@@ -291,7 +290,6 @@ def validate_article(
         if p.is_file():
             valid_imgs.append(p)
 
-    # Если по путям из meta.json не найдено, ищем в подпапке 'images'
     if not valid_imgs:
         imgs_dir = article_dir / "images"
         if imgs_dir.is_dir():
@@ -303,7 +301,7 @@ def validate_article(
     # Подготовка заголовка в HTML-формате (жирный текст)
     html_title = f"<b>{escape_html(title)}</b>"
     
-    return html_title, text_path, valid_imgs
+    return html_title, text_path, valid_imgs, title # Возвращаем оригинальный заголовок
 
 
 def load_posted_ids(state_file: Path) -> Set[int]:
@@ -422,11 +420,14 @@ async def main(parsed_dir: str, state_path: str, limit: Optional[int]):
                 if art_meta.get("id") is not None and art_meta["id"] not in posted_ids_old:
                     validated_data = validate_article(art_meta, d)
                     if validated_data:
+                        # Разбираем возвращаемые данные, включая оригинальный заголовок
+                        html_title, text_path, image_paths, original_plain_title = validated_data
                         validated_data_dict = {
                             "id": art_meta["id"],
-                            "html_title": validated_data[0],
-                            "text_path": validated_data[1],
-                            "image_paths": validated_data[2]
+                            "html_title": html_title,
+                            "text_path": text_path,
+                            "image_paths": image_paths,
+                            "original_plain_title": original_plain_title # Сохраняем оригинальный заголовок
                         }
                         articles_to_post.append(validated_data_dict)
                     else:
@@ -462,6 +463,7 @@ async def main(parsed_dir: str, state_path: str, limit: Optional[int]):
         html_title  = article["html_title"]
         text_path   = article["text_path"]
         image_paths = article["image_paths"]
+        original_plain_title = article["original_plain_title"] # Получаем оригинальный заголовок
 
         logging.info("Попытка публикации ID=%s", aid)
         
@@ -472,20 +474,44 @@ async def main(parsed_dir: str, state_path: str, limit: Optional[int]):
                 if not await send_media_group(client, token, chat_id, image_paths):
                     logging.warning("Не удалось отправить медиагруппу для ID=%s. Продолжаем отправлять только текст.", aid)
             
-            # 3.2) Подготовка полного текста: HTML-заголовок + экранированное содержимое статьи
+            # 3.2) Подготовка полного текста: HTML-заголовок + очищенное и экранированное содержимое статьи
             raw_text = text_path.read_text(encoding="utf-8")
-            escaped_raw_text = escape_html(raw_text)
+
+            cleaned_raw_text = raw_text
+            if original_plain_title:
+                # Экранируем оригинальный заголовок для использования в регулярном выражении
+                escaped_plain_title_for_regex = re.escape(original_plain_title)
+                
+                # Регулярное выражение для поиска заголовка в начале текста,
+                # за которым следуют один или более пробелов/новых строк.
+                # re.DOTALL позволяет '.' соответствовать символам новой строки.
+                # re.IGNORECASE может быть полезен, если регистр заголовка в файле может отличаться.
+                pattern = re.compile(rf"^{escaped_plain_title_for_regex}\s*", re.DOTALL | re.IGNORECASE)
+
+                match = pattern.match(raw_text)
+                if match:
+                    cleaned_raw_text = raw_text[match.end():] # Обрезаем текст после заголовка и всех пробелов/newlines
+                else:
+                    # Если регулярное выражение не нашло точного совпадения,
+                    # это может означать, что заголовок не находится в самом начале,
+                    # или есть небольшие расхождения. Выводим предупреждение.
+                    logging.warning(
+                        f"Оригинальный заголовок '{original_plain_title}' не найден в начале текстового файла для ID={aid}. "
+                        "Продолжаем без удаления. Убедитесь, что текстовый файл начинается с заголовка из meta.json."
+                    )
+                    cleaned_raw_text = raw_text # Если не найдено, оставляем текст как есть
+
+            escaped_raw_text = escape_html(cleaned_raw_text)
             full_html_content = f"{html_title}\n\n{escaped_raw_text}"
             
             # 3.3) Делим на чанки
             chunks = chunk_text(full_html_content)
-            num_chunks = len(chunks) # Общее количество чанков
+            num_chunks = len(chunks)
 
             all_chunks_sent = True
             for i, part in enumerate(chunks):
                 current_reply_markup = None
-                # Если это последний чанк, добавляем кнопки
-                if i == num_chunks - 1:
+                if i == num_chunks - 1: # Если это последний чанк, добавляем кнопки
                     keyboard = {
                         "inline_keyboard": [
                             [
