@@ -522,7 +522,7 @@ async def main(parsed_dir: str, state_path: str, limit: Optional[int]):
             # 3.1) Отправляем изображения (если есть).
             # Заголовок отправляется как подпись к первой картинке медиагруппы
             if image_paths:
-                if not await send_media_group(client, token, chat_id, image_paths, caption=caption):
+                if not await send_media_group(client, token, chat_id, image_paths, caption="Null"):
                     logging.warning("Не удалось отправить медиагруппу для ID=%s. Продолжаем отправлять только текст (заголовок будет в тексте).", aid)
                     # Если медиагруппа не отправлена, пропускаем отправку отдельного заголовка.
                     # Переходим сразу к отправке основного текста.
