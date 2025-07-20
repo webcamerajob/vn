@@ -1,352 +1,393 @@
+#!/usr/bin/env python3
+import argparse
 import logging
-import time
 import json
-import os
+import hashlib
+import time
 import re
-from typing import Optional, List, Tuple
-import random 
+import os
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-# Импорты для Cloudscraper
-import cloudscraper
+# Убедитесь, что эти импорты у вас есть, если они используются
 from bs4 import BeautifulSoup
+import cloudscraper # Для fetch_category_id, fetch_posts, save_image
+import translators as ts # Для translate_text
+import fcntl # Для блокировки файлов в load_catalog и save_catalog
 
-# Импорты для Selenium
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, WebDriverException
+# Настройка переменной окружения (должна быть в начале, один раз)
+os.environ["translators_default_region"] = "EN"
 
-# --- Импорт для undetected_chromedriver ---
-import undetected_chromedriver as uc
-
-# --- КОНФИГУРАЦИЯ ЛОГИРОВАНИЯ ---
-# Уровень INFO для обычных запусков. Для подробной отладки HTML установите DEBUG.
+# Настройки логирования
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# --- КОНФИГУРАЦИЯ ПАРСЕРА ---
+# Предполагаемые константы
+OUTPUT_DIR = Path("articles") # Возвращаем к исходной директории
+CATALOG_PATH = OUTPUT_DIR / "catalog.json"
 MAX_RETRIES = 3
-BASE_DELAY = 1.0 # Базовая задержка между попытками/статьями
-SCRAPER_TIMEOUT = 30 # Увеличиваем общий таймаут для HTTP-запросов
+BASE_DELAY = 1.0 # Базовая задержка для ретраев
 
-# --- ИНИЦИАЛИЗАЦИЯ CLOUDSCRAPER ---
-# Инициализируем Cloudscraper для обхода Cloudflare.
-scraper = cloudscraper.create_scraper(
-    browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False},
-    delay=10 # Задержка между запросами, чтобы не быть заблокированным
-)
+# cloudscraper для обхода Cloudflare
+SCRAPER = cloudscraper.create_scraper()
+SCRAPER_TIMEOUT = (10.0, 60.0)      # (connect_timeout, read_timeout) в секундах
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ПАРСИНГА ---
 
-def _extract_content_and_images(soup: BeautifulSoup, article_url: str) -> Tuple[Optional[str], List[str]]:
+# --- Вспомогательные функции (реальные реализации из нашего обсуждения) ---
+def load_posted_ids(state_file_path: Path) -> Set[str]:
     """
-    Вспомогательная функция для извлечения текста и изображений из объекта BeautifulSoup.
-    Используется обоими методами (Cloudscraper и Selenium).
+    Загружает множество ID из файла состояния (например, posted.json).
+    Используется блокировка файла для безопасного чтения.
     """
-    full_text_parts = []
-    image_urls = []
+    try:
+        if state_file_path.exists():
+            with open(state_file_path, 'r', encoding='utf-8') as f:
+                fcntl.flock(f, fcntl.LOCK_SH) # Блокировка для чтения
+                return {str(item) for item in json.load(f)}
+        return set()
+    except (FileNotFoundError, json.JSONDecodeError, IOError) as e:
+        logging.warning(f"Could not load posted IDs from {state_file_path}: {e}. Assuming empty set.")
+        return set()
 
-    # Ищем основной контент-блок. Использован более широкий набор селекторов для универсальности.
-    content_div = soup.select_one('div#fck_detail, article.fck_detail, div.detail-content, div.main_content_detail, div.folder_detail')
+def extract_img_url(img_tag: Any) -> Optional[str]:
+    """Извлекает URL изображения из тега <img>."""
+    for attr in ("data-src", "data-lazy-src", "data-srcset", "srcset", "src"):
+        val = img_tag.get(attr)
+        if not val:
+            continue
+        parts = val.split()
+        if parts:
+            return parts[0]
+    return None
 
-    # Дополнительные селекторы для фото-историй или других типов статей, если основной не найден
-    if not content_div:
-        content_div = soup.select_one('div.box_category_show, div.wrapper_detail_photo_story')
-
-    if content_div:
-        logging.debug(f"Found main/photo content div for {article_url}")
-        # Извлечение всех параграфов и элементов, содержащих текст
-        # Используем find_all(['p', 'h2', 'h3', 'li', 'div']) для более широкого охвата текстовых элементов
-        for p_tag in content_div.find_all(['p', 'h2', 'h3', 'li', 'div'], recursive=True):
-            # Пропускаем параграфы, содержащие только жирный текст (обычно это подписи к фото)
-            if p_tag.name == 'p' and p_tag.find('strong') and p_tag.get_text(strip=True) == p_tag.find('strong').get_text(strip=True):
-                continue
-            # Избегаем дублирования, если родительский div уже является основным контентом
-            if p_tag.name == 'div' and ('detail-content' in p_tag.get('class', []) or 'fck_detail' in p_tag.get('class', [])):
-                continue
-            
-            text = p_tag.get_text(separator=' ', strip=True)
-            # Фильтруем подписи к фото/видео, которые могут быть ошибочно захвачены
-            if text and not text.lower().startswith("photo:") and not text.lower().startswith("video:"):
-                full_text_parts.append(text)
-
-        # --- Извлечение изображений ---
-        image_tags = content_div.find_all('img') if content_div else []
-        # Дополнительные селекторы для изображений, если не нашлись в content_div
-        if not image_tags: 
-             image_tags = soup.select('div.item_photo_detail img, .vne_lazy_image, .thumb_art img, picture img')
-        
-        for img_tag in image_tags:
-            src = img_tag.get('data-src') or img_tag.get('src')
-            if src and src.startswith(('http', '//')):
-                if src.startswith('//'):
-                    src = 'https:' + src
-                # Удаляем параметры размера и хеш после '?', чтобы получить базовый URL
-                if "?" in src:
-                    src = src.split('?')[0]
-                image_urls.append(src)
-        
-        # Удаляем дубликаты URL изображений
-        image_urls = list(dict.fromkeys(image_urls))
-        full_text = "\n\n".join(full_text_parts)
-        
-    else:
-        logging.warning(f"Could not find any suitable content div in parsed HTML for {article_url}")
-        full_text = ""
-
-    return full_text, image_urls
-
-# --- МЕТОДЫ ПАРСИНГА ---
-
-def parse_with_cloudscraper(article_url: str) -> Tuple[Optional[str], List[str]]:
-    """Попытка извлечь статью с помощью Cloudscraper."""
-    logging.info(f"Attempting to fetch with Cloudscraper: {article_url}")
+def fetch_category_id(base_url: str, slug: str) -> int:
+    """Получает ID категории по ее 'slug'."""
+    logging.info(f"Fetching category ID for {slug} from {base_url}...")
+    endpoint = f"{base_url}/wp-json/wp/v2/categories?slug={slug}"
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            r = scraper.get(article_url, timeout=SCRAPER_TIMEOUT)
-            r.raise_for_status() # Вызывает исключение для плохих HTTP-статусов (4xx или 5xx)
-            
-            if logging.root.level <= logging.DEBUG:
-                logging.debug(f"Cloudscraper Raw HTML for {article_url} (first 5000 chars):\n{r.text[:5000]}...")
-            
-            soup = BeautifulSoup(r.text, 'html.parser')
-            full_text, image_urls = _extract_content_and_images(soup, article_url)
-
-            if full_text.strip() or image_urls:
-                logging.info(f"Cloudscraper SUCCESS for {article_url}")
-                return full_text, image_urls
-            else:
-                logging.warning(f"Cloudscraper extracted empty content for {article_url}")
-                return None, [] 
-
-        except Exception as e:
-            delay = BASE_DELAY * 2 ** (attempt - 1) # Экспоненциальная задержка
+            r = SCRAPER.get(endpoint, timeout=SCRAPER_TIMEOUT)
+            r.raise_for_status()
+            data = r.json()
+            if not data:
+                raise RuntimeError(f"Category '{slug}' not found")
+            return data[0]["id"]
+        except (ReqTimeout, RequestException) as e:
+            delay = BASE_DELAY * 2 ** (attempt - 1)
             logging.warning(
-                "Cloudscraper failed fetching %s (try %s/%s): %s; retrying in %.1fs",
-                article_url, attempt, MAX_RETRIES, e, delay
+                "Timeout fetching category (try %s/%s): %s; retry in %.1fs",
+                attempt, MAX_RETRIES, e, delay
             )
             time.sleep(delay)
-    logging.error(f"Cloudscraper failed after {MAX_RETRIES} attempts for {article_url}")
-    return None, []
+        except json.JSONDecodeError as e:
+            logging.error("JSON decode error for categories: %s", e)
+            break
+    raise RuntimeError("Failed fetching category id")
 
-def parse_with_selenium(article_url: str) -> Tuple[Optional[str], List[str]]:
-    """Попытка извлечь статью с помощью Selenium с undetected_chromedriver."""
-    logging.info(f"Attempting to fetch with Selenium (undetected_chromedriver): {article_url}")
-    driver = None
+def fetch_posts(base_url: str, cat_id: int, per_page: int = 10) -> List[Dict[str, Any]]:
+    """Получает список постов из указанной категории."""
+    logging.info(f"Fetching posts for category {cat_id} from {base_url}, per_page={per_page}...")
+    endpoint = f"{base_url}/wp-json/wp/v2/posts?categories={cat_id}&per_page={per_page}&_embed"
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            r = SCRAPER.get(endpoint, timeout=SCRAPER_TIMEOUT)
+            r.raise_for_status()
+            return r.json()
+        except (ReqTimeout, RequestException) as e:
+            delay = BASE_DELAY * 2 ** (attempt - 1)
+            logging.warning(
+                "Timeout fetching posts (try %s/%s): %s; retry in %.1fs",
+                attempt, MAX_RETRIES, e, delay
+            )
+            time.sleep(delay)
+        except json.JSONDecodeError as e:
+            logging.error("JSON decode error for posts: %s", e)
+            break
+    logging.error("Giving up fetching posts")
+    return []
+
+def save_image(src_url: str, folder: Path) -> Optional[str]:
+    """Сохраняет изображение по URL в указанную папку."""
+    logging.info(f"Saving image from {src_url} to {folder}...")
+    folder.mkdir(parents=True, exist_ok=True)
+    fn = src_url.rsplit('/', 1)[-1].split('?', 1)[0]
+    dest = folder / fn
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            r = SCRAPER.get(src_url, timeout=SCRAPER_TIMEOUT)
+            r.raise_for_status()
+            dest.write_bytes(r.content)
+            return str(dest)
+        except (ReqTimeout, RequestException) as e:
+            delay = BASE_DELAY * 2 ** (attempt - 1)
+            logging.warning(
+                "Timeout saving image %s (try %s/%s): %s; retry in %.1fs",
+                fn, attempt, MAX_RETRIES, e, delay
+            )
+            time.sleep(delay)
+    logging.error("Failed saving image %s after %s attempts", fn, MAX_RETRIES)
+    return None
+
+def load_catalog() -> List[Dict[str, Any]]:
+    """Загружает каталог статей из catalog.json с блокировкой файла."""
+    if not CATALOG_PATH.exists():
+        return []
     try:
-        local_chrome_options_uc = Options()
-        local_chrome_options_uc.add_argument("--no-sandbox") # Важно для окружений CI/CD
-        local_chrome_options_uc.add_argument("--disable-dev-shm-usage") # Важно для окружений CI/CD
-        local_chrome_options_uc.add_argument("--disable-gpu") # Рекомендуется для headless-режима
-        local_chrome_options_uc.add_argument("--window-size=1920,1080") # Задаем размер окна для имитации реального браузера
-        local_chrome_options_uc.add_argument("--incognito") # Используем инкогнито-режим
-        
-        # Добавляем User-Agent, соответствующий Chrome 138 (можете обновить, если версия Chrome изменится)
-        local_chrome_options_uc.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36")
-        
-        # Дополнительные опции для уменьшения вероятности обнаружения
-        local_chrome_options_uc.add_argument("--disable-extensions")
-        local_chrome_options_uc.add_argument("--hide-scrollbars")
-        local_chrome_options_uc.add_argument("--mute-audio")
-        local_chrome_options_uc.add_argument("--no-default-browser-check")
-        local_chrome_options_uc.add_argument("--no-first-run")
-        local_chrome_options_uc.add_argument("--disable-infobars")
+        with open(CATALOG_PATH, "r", encoding="utf-8") as f:
+            fcntl.flock(f, fcntl.LOCK_SH)  # Блокировка для чтения
+            data = json.load(f)
+            # Валидация данных: фильтруем некорректные записи
+            return [item for item in data if isinstance(item, dict) and "id" in item]
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        logging.error("Catalog JSON decode error: %s", e)
+        return []
+    except IOError as e:
+        logging.error("Catalog read error: %s", e)
+        return []
 
-        # Инициализация undetected_chromedriver с явно указанным путем к ChromeDriver
-        # Мы скачиваем его вручную в workflow, чтобы гарантировать правильную версию.
-        driver = uc.Chrome(
-            headless=True, # Запуск в безголовом режиме
-            use_subprocess=True, # Может помочь в CI окружениях
-            options=local_chrome_options_uc,
-            driver_executable_path="/usr/local/bin/chromedriver" # Путь к драйверу, установленному в workflow
-        ) 
-
-        # Установка таймаутов для Selenium
-        driver.set_page_load_timeout(90) # УВЕЛИЧЕНО до 90 секунд для полной загрузки страницы
-        driver.set_script_timeout(30)    # Максимальное время для выполнения асинхронных скриптов
-
-        driver.get(article_url)
-
-        # Ждем, пока основной контентный div станет видимым/присутствующим на странице
-        WebDriverWait(driver, 90).until( # УВЕЛИЧЕНО до 90 секунд для ожидания элемента
-            EC.presence_of_element_located((By.ID, "fck_detail"))
-        )
-
-        page_source = driver.page_source
-        
-        if logging.root.level <= logging.DEBUG:
-            logging.debug(f"Selenium Raw HTML for {article_url} (first 5000 chars):\n{page_source[:5000]}...")
-
-        soup = BeautifulSoup(page_source, 'html.parser')
-        full_text, image_urls = _extract_content_and_images(soup, article_url)
-
-        if full_text.strip() or image_urls:
-            logging.info(f"Selenium SUCCESS for {article_url}")
-            return full_text, image_urls
+def save_catalog(catalog: List[Dict[str, Any]]) -> None:
+    """
+    Сохраняет каталог статей в catalog.json с блокировкой файла.
+    Сохраняет только минимальный набор полей для защиты от дублей:
+    id, hash, translated_to
+    """
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    # Фильтруем каждую запись
+    minimal = []
+    for item in catalog:
+        if isinstance(item, dict) and "id" in item:
+            minimal.append({
+                "id": item["id"],
+                "hash": item.get("hash", ""),
+                "translated_to": item.get("translated_to", "")
+            })
         else:
-            logging.warning(f"Selenium extracted empty content for {article_url}")
-            return None, []
+            logging.warning(f"Skipping malformed catalog entry: {item}")
 
-    except TimeoutException:
-        logging.error(f"Selenium Timeout: element #fck_detail not found or page load timed out for {article_url}. This might indicate strong bot detection.")
-        return None, []
-    except WebDriverException as e:
-        logging.error(f"Selenium WebDriver Error for {article_url}: {e}", exc_info=True)
-        return None, []
+    try:
+        with open(CATALOG_PATH, "w", encoding="utf-8") as f:
+            fcntl.flock(f, fcntl.LOCK_EX) # Блокировка для записи
+            json.dump(minimal, f, ensure_ascii=False, indent=2)
+    except IOError as e:
+        logging.error("Failed to save catalog: %s", e)
+
+def translate_text(text: str, to_lang: str = "ru", provider: str = "yandex") -> str:
+    """
+    Перевод текста через translators с защитой от ошибок.
+    Возвращает оригинал, если перевод недоступен.
+    """
+    logging.info(f"Translating text (provider: {provider}) to {to_lang}...")
+    if not text or not isinstance(text, str):
+        return ""
+    try:
+        translated = ts.translate_text(text, translator=provider, from_language="en", to_language=to_lang)
+        if isinstance(translated, str):
+            return translated
+        logging.warning("Translator returned non-str for text: %s", text[:50])
     except Exception as e:
-        logging.error(f"Selenium failed for {article_url}: {e}", exc_info=True)
-        return None, []
-    finally:
-        if driver:
-            driver.quit() # Важно закрывать браузер после использования
+        logging.warning("Translation error [%s → %s]: %s", provider, to_lang, e)
+    return text
 
-# --- ОСНОВНАЯ ФУНКЦИЯ ДЛЯ ЗАПУСКА ПАРСИНГА ---
+# Регулярные выражения для очистки текста
+bad_re = re.compile(r"[\u200b-\u200f\uFEFF\u200E\u00A0]") # Пример
 
-def get_article_content(article_url: str) -> Tuple[Optional[str], List[str]]:
-    """
-    Пытается получить контент статьи, сначала используя Cloudscraper,
-    затем, если не удалось, переключается на Selenium.
-    """
-    
-    # Попытка с Cloudscraper
-    text, images = parse_with_cloudscraper(article_url)
-    if text or images:
-        return text, images
-    
-    # Если Cloudscraper не удался, попытка с Selenium
-    logging.info("Cloudscraper failed, attempting with Selenium...")
-    text, images = parse_with_selenium(article_url)
-    if text or images:
-        return text, images
-    
-    logging.error(f"Failed to get content for {article_url} with all methods.")
-    return None, []
+# Функция parse_and_save (без изменений в логике, только форматирование)
+def parse_and_save(post: Dict[str, Any], translate_to: str, base_url: str) -> Optional[Dict[str, Any]]:
+    """Парсит и сохраняет статью, включая перевод и загрузку изображений."""
+    aid, slug = post["id"], post["slug"]
+    art_dir = OUTPUT_DIR / f"{aid}_{slug}"
+    art_dir.mkdir(parents=True, exist_ok=True)
 
-# --- ГЛАВНАЯ ЛОГИКА (Если запускается как основной скрипт) ---
-if __name__ == "__main__":
-    import argparse
+    # Проверяем существующую статью
+    meta_path = art_dir / "meta.json"
+    if meta_path.exists():
+        try:
+            existing_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            current_hash = hashlib.sha256(post["content"]["rendered"].encode()).hexdigest()
+            # Проверяем, изменился ли контент или язык перевода
+            if existing_meta.get("hash") == current_hash and existing_meta.get("translated_to", "") == translate_to:
+                logging.info(f"Skipping unchanged article ID={aid} (content and translation match local cache).")
+                return existing_meta
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            logging.warning(f"Failed to read existing meta for ID={aid}: {e}. Reparsing.")
 
-    parser = argparse.ArgumentParser(description="Parse articles from an RSS feed.")
-    parser.add_argument("--rss-url", type=str, required=True, help="URL of the RSS feed to parse.")
-    parser.add_argument("-l", "--lang", type=str, default="en", help="Language code (e.g., 'ru', 'en').")
-    parser.add_argument("-n", "--num-articles", type=int, default=5, help="Number of articles to process from the RSS feed.")
-    parser.add_argument("--limit", type=int, default=30, help="Maximum number of articles to process per run.")
-    parser.add_argument("--posted-state-file", type=str, default="articles/posted.json", help="Path to the JSON file storing IDs of already posted articles.")
+    orig_title = BeautifulSoup(post["title"]["rendered"], "html.parser").get_text(strip=True)
+    title = orig_title
 
+    if translate_to:
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                title = translate_text(orig_title, to_lang=translate_to, provider="yandex")
+                break
+            except Exception as e:
+                delay = BASE_DELAY * 2 ** (attempt - 1)
+                logging.warning(
+                    "Translate title attempt %s failed: %s; retry in %.1fs",
+                    attempt, MAX_RETRIES, e, delay
+                )
+                time.sleep(delay)
+
+    soup = BeautifulSoup(post["content"]["rendered"], "html.parser")
+
+    paras = [p.get_text(strip=True) for p in soup.find_all("p")]
+    raw_text = "\n\n".join(paras)
+    raw_text = bad_re.sub("", raw_text)
+    raw_text = re.sub(r"[ \t]+", " ", raw_text)
+    raw_text = re.sub(r"\n{3,}", "\n\n", raw_text)
+
+    # Вставка заголовка в начало
+    # raw_text = f"**{title}**\n\n{raw_text}"
+
+    img_dir = art_dir / "images"
+    images: List[str] = []
+    srcs = []
+
+    for img in soup.find_all("img")[:10]:
+        url = extract_img_url(img)
+        if url:
+            srcs.append(url)
+
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        futures = {ex.submit(save_image, url, img_dir): url for url in srcs}
+        for fut in as_completed(futures):
+            if path := fut.result():
+                images.append(path)
+
+    if not images and "_embedded" in post:
+        media = post["_embedded"].get("wp:featuredmedia")
+        if media and media[0].get("source_url"):
+            path = save_image(media[0]["source_url"], img_dir)
+            if path:
+                images.append(path)
+
+    if not images:
+        logging.warning("No images for ID=%s; skipping article parsing and saving.", aid)
+        return None
+
+    meta = {
+        "id": aid, "slug": slug,
+        "date": post.get("date"), "link": post.get("link"),
+        "title": title,
+        "text_file": str(art_dir / "content.txt"),
+        "images": images, "posted": False,
+        "hash": hashlib.sha256(raw_text.encode()).hexdigest()
+    }
+    (art_dir / "content.txt").write_text(raw_text, encoding="utf-8")
+
+    if translate_to:
+        h = meta["hash"]
+        old = {}
+        if meta_path.exists():
+            try:
+                old = json.loads(meta_path.read_text(encoding="utf-8"))
+            except json.JSONDecodeError:
+                pass
+
+        if old.get("hash") != h or old.get("translated_to") != translate_to:
+            for attempt in range(1, MAX_RETRIES + 1):
+                try:
+                    clean_paras = [bad_re.sub("", p) for p in paras]
+                    trans = [translate_text(p, to_lang=translate_to, provider="yandex") for p in clean_paras]
+
+                    txt_t = art_dir / f"content.{translate_to}.txt"
+                    trans_txt = "\n\n".join(trans)
+                    header_t = f"{title}\n\n\n"
+                    txt_t.write_text(header_t + trans_txt, encoding="utf-8")
+
+                    meta.update({
+                        "translated_to": translate_to,
+                        "translated_paras": trans,
+                        "translated_file": str(txt_t),
+                        "text_file": str(txt_t)
+                    })
+
+                    break
+                except Exception as e:
+                    delay = BASE_DELAY * 2 ** (attempt - 1)
+                    logging.warning("Translate try %s failed: %s; retry in %.1fs", attempt, e, delay)
+                    time.sleep(delay)
+            else: # Это `else` относится к `for` циклу, если не было `break`
+                logging.warning("Translation failed after max retries for ID=%s.", aid)
+        else:
+            logging.info("Using cached translation %s for ID=%s", translate_to, aid)
+
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    return meta
+
+# --- Основная функция main() ---
+def main():
+    parser = argparse.ArgumentParser(description="Parser with translation")
+    parser.add_argument("--base-url", type=str,
+                        default="https://www.khmertimeskh.com",
+                        help="WP site base URL")
+    parser.add_argument("--slug", type=str, default="national",
+                        help="Category slug")
+    parser.add_argument("-n", "--limit", type=int, default=None,
+                        help="Max posts to parse")
+    parser.add_argument("-l", "--lang", type=str, default="",
+                        help="Translate to language code")
+    parser.add_argument(
+        "--posted-state-file",
+        type=str,
+        default="articles/posted.json", # Убедитесь, что это правильный путь
+        help="Путь к файлу состояния с ID уже опубликованных статей (только для чтения)"
+    )
     args = parser.parse_args()
 
-    RSS_URL = args.rss_url
-    TARGET_LANG = args.lang
-    NUM_ARTICLES_FROM_RSS = args.num_articles
-    BATCH_LIMIT = args.limit
-    POSTED_STATE_FILE = args.posted_state_file
-
-    def get_posted_article_ids(file_path: str) -> set:
-        if not os.path.exists(file_path):
-            return set()
-        with open(file_path, 'r', encoding='utf-8') as f:
-            try:
-                return set(json.load(f))
-            except json.JSONDecodeError:
-                logging.warning(f"Error decoding {file_path}. Starting with empty posted set.")
-                return set()
-
-    def add_posted_article_id(file_path: str, article_id: str):
-        posted_ids = get_posted_article_ids(file_path)
-        posted_ids.add(article_id)
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(list(posted_ids), f, indent=4)
-
-    posted_ids = get_posted_article_ids(POSTED_STATE_FILE)
-    new_articles_found_status = False
-    processed_count = 0
-
-    logging.info(f"Starting RSS feed processing for: {RSS_URL}")
-    logging.info(f"Already posted articles count: {len(posted_ids)}")
-    
-    # --- Проверка внешнего IP в логах ---
-    # Этот шаг помогает понять, с какого IP-адреса GitHub Actions делает запросы.
-    import requests
-    logging.info("Checking external IP...")
     try:
-        ip_response = requests.get('http://ip-api.com/json', timeout=10)
-        ip_response.raise_for_status()
-        ip_data = ip_response.json()
-        logging.info(f"Current external IP: {ip_data.get('query')}, Country: {ip_data.get('country')}")
-    except Exception as e:
-        logging.warning(f"Could not check external IP: {e}")
-    # --- КОНЕЦ ПРОВЕРКИ IP ---
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        cid = fetch_category_id(args.base_url, args.slug)
+        posts = fetch_posts(args.base_url, cid, per_page=(args.limit or 10))
 
+        catalog = load_catalog()
+        existing_ids_in_catalog = {article["id"] for article in catalog}
 
-    try:
-        # Используем Cloudscraper для получения RSS-ленты, т.к. там нет JS-защиты
-        rss_response = scraper.get(RSS_URL, timeout=SCRAPER_TIMEOUT)
-        rss_response.raise_for_status()
-        rss_soup = BeautifulSoup(rss_response.text, 'xml') # RSS - это XML
+        posted_ids_from_repo = load_posted_ids(Path(args.posted_state_file))
 
-        items = rss_soup.find_all('item')
-        logging.info(f"Found {len(items)} items in RSS feed.")
+        logging.info(f"Loaded {len(posted_ids_from_repo)} posted IDs from {args.posted_state_file}.")
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f"Posted IDs: {posted_ids_from_repo}")
 
-        for item in items:
-            if processed_count >= BATCH_LIMIT:
-                logging.info(f"Batch limit of {BATCH_LIMIT} reached. Stopping processing new articles from RSS.")
-                break
+        # Инициализация переменной new_articles_processed_in_run
+        new_articles_processed_in_run = 0
 
-            link = item.find('link').text
-            title = item.find('title').text
-            pub_date_str = item.find('pubDate').text
-            
-            # Извлекаем ID из URL
-            match = re.search(r'-(\d+)\.html', link)
-            article_id = match.group(1) if match else link # Используем ссылку как ID, если не можем извлечь числовой ID
+        for post in posts[:args.limit or len(posts)]:
+            post_id = str(post["id"])
 
-            if article_id in posted_ids:
-                logging.info(f"Article '{title}' (ID: {article_id}) already posted. Skipping.")
+            if post_id in posted_ids_from_repo:
+                logging.info(f"Skipping article ID={post_id} as it's already in {args.posted_state_file}.")
                 continue
 
-            logging.info(f"New article found: '{title}' (ID: {article_id})")
-            
-            # --- Основной вызов функции парсинга ---
-            article_text, article_images = get_article_content(link)
+            is_in_local_catalog = post_id in existing_ids_in_catalog
 
-            if article_text and article_text.strip():
-                # Сохранение статьи в JSON
-                output_dir = "articles"
-                os.makedirs(output_dir, exist_ok=True)
-                
-                # Добавляем штамп времени для уникальности файла
-                timestamp = int(time.time())
-                output_filename = os.path.join(output_dir, f"{article_id}_{timestamp}.json")
-                
-                article_data = {
-                    "id": article_id,
-                    "title": title,
-                    "url": link,
-                    "pubDate": pub_date_str,
-                    "text": article_text,
-                    "images": article_images
-                }
-                
-                with open(output_filename, 'w', encoding='utf-8') as f:
-                    json.dump(article_data, f, ensure_ascii=False, indent=4)
-                
-                logging.info(f"Article '{title}' saved to {output_filename}")
-                new_articles_found_status = True
-                add_posted_article_id(POSTED_STATE_FILE, article_id)
-                processed_count += 1
-                # Добавляем случайную задержку между обработкой статей для имитации человеческого поведения
-                time.sleep(BASE_DELAY + random.uniform(2.0, 5.0)) # Случайная задержка
-            else:
-                logging.warning(f"Could not extract content for article '{title}' (ID: {article_id}). Skipping.")
+            # Обработка статьи (парсинг и сохранение)
+            if meta := parse_and_save(post, args.lang, args.base_url):
+                if is_in_local_catalog:
+                    # Если статья уже в каталоге, удаляем старую запись
+                    catalog = [item for item in catalog if item["id"] != post_id]
+                    logging.info(f"Updated article ID={post_id} in local catalog (content changed or re-translated).")
+                else:
+                    new_articles_processed_in_run += 1
+                    logging.info(f"Processed new article ID={post_id} and added to local catalog.")
+
+                catalog.append(meta)
+                existing_ids_in_catalog.add(post_id)
+
+        # Сохранение каталога и вывод статуса
+        if new_articles_processed_in_run > 0:
+            save_catalog(catalog)
+            logging.info(f"Added {new_articles_processed_in_run} truly new articles. Total parsed articles in catalog: {len(catalog)}")
+            print("NEW_ARTICLES_STATUS:true")
+        else:
+            logging.info("No new articles found or processed that are not already in posted.json or local catalog.")
+            print("NEW_ARTICLES_STATUS:false")
 
     except Exception as e:
-        logging.error(f"Error during RSS feed processing: {e}", exc_info=True)
+        logging.exception("Fatal error in main:")
+        exit(1)
 
-    # ВАЖНО: Эта строка выводится в stdout, чтобы GitHub Actions мог ее прочитать.
-    # В этой отладочной версии она не будет перенаправлена в файл, а пойдет в лог консоли.
-    print(f"NEW_ARTICLES_STATUS:{'true' if new_articles_found_status else 'false'}")
-    logging.info("→ PARSER RUN COMPLETE")
-    
+# Убедитесь, что этот блок БЕЗ ОТСТУПА!
+if __name__ == "__main__":
+    main()
